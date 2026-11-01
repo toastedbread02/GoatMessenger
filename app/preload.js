@@ -5,7 +5,6 @@ contextBridge.exposeInMainWorld('goat', {
   info: () => ipcRenderer.invoke('app:info'),
   newWindow: () => ipcRenderer.invoke('app:newWindow'),
   retryRelay: () => ipcRenderer.invoke('app:retryRelay'),
-  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   saveFile: (name, data) => ipcRenderer.invoke('app:saveFile', { name, data }),
   saveTemp: (name, data, mime) => ipcRenderer.invoke('app:saveTemp', { name, data, mime }),
   openPath: (target) => ipcRenderer.invoke('app:openPath', target),

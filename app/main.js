@@ -497,11 +497,6 @@ ipcMain.handle('app:retryRelay', async () => {
   return { relayUrl, relayError };
 });
 
-ipcMain.handle('app:openExternal', (event, url) => {
-  if (/^https:\/\//.test(String(url))) shell.openExternal(url);
-  return true;
-});
-
 ipcMain.handle('app:saveFile', async (event, { name, data }) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const safe = String(name || 'goat-file').replace(/[/\\?%*:|"<>]/g, '-').slice(0, 120);

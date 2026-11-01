@@ -1752,52 +1752,6 @@ function devPane() {
     el('small', { class: 'net-hint', text: 'Developer tools for poking at relays, TURN and diagnostics. Unlock: About → tap the version 5 times.' }));
 }
 
-/* "send it to a friend" downloader --------------------------------------------------------- */
-
-const DL_RELEASE = 'https://github.com/toastedbread02/GoatMessenger/releases/latest/download';
-const DL_CHOICES = [
-  { os: 'win', icon: 'windows', title: 'Windows', note: 'Portable .exe — nothing to install' },
-  { os: 'mac', icon: 'macos', title: 'macOS', note: 'Open the DMG, drag the goat into Applications' },
-];
-
-function openDownloadPopup() {
-  const existing = document.querySelector('.dl-pop');
-  if (existing) { existing.remove(); return; }
-
-  const mine = window.goat?.platform === 'win32' ? 'win' : 'mac';
-  const choices = [...DL_CHOICES].sort((a) => (a.os === mine ? -1 : 1));
-  const anchor = $('#btn-download').getBoundingClientRect();
-
-  const close = (_event) => {
-    pop.remove();
-    window.removeEventListener('mousedown', close, true);
-  };
-  const pop = el('div', { class: 'dl-pop' },
-    el('div', { class: 'dl-pop-head' },
-      el('span', { class: 'dl-pop-title', text: 'Download GoatMessenger' }),
-      el('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: close }, icon('x'))),
-    el('div', { class: 'dl-pop-sub', text: 'Encrypted on the other machine too — send a friend a version for their system:' }),
-    ...choices.map((c) => el('button', {
-      class: `dl-row${c.os === mine ? ' mine' : ''}`,
-      onclick: () => {
-        window.goat?.openExternal?.(`${DL_RELEASE}/${c.os === 'win' ? 'GoatMessenger-Portable.exe' : 'GoatMessenger.dmg'}`);
-        toast(c.os === mine ? 'Downloading — check your browser' : `Opening the ${c.title} download in your browser`);
-        close();
-      },
-    },
-    el('span', { class: 'dl-row-icon' }, icon(c.icon)),
-    el('span', { class: 'dl-row-text' },
-      el('b', { text: c.title }),
-      el('small', { text: c.note })),
-    c.os === mine ? el('em', { class: 'dl-mine', text: 'your system' }) : null)));
-
-  document.body.append(pop);
-  const h = pop.offsetHeight;
-  pop.style.left = `${Math.round(Math.max(12, Math.min(anchor.right - pop.offsetWidth, window.innerWidth - pop.offsetWidth - 12)))}px`;
-  pop.style.top = `${Math.round(Math.max(12, anchor.top - h - 10))}px`;
-  window.addEventListener('mousedown', close, true);
-}
-
 function openSettings(category = S.settingsCat || 'account') {
   const panes = {
     account: accountPane,
@@ -2228,7 +2182,6 @@ function wireStaticUi() {
   });
 
   $('#btn-settings').addEventListener('click', openSettings);
-  $('#btn-download').addEventListener('click', openDownloadPopup);
   $('#btn-verify').addEventListener('click', openVerify);
   $('#search').addEventListener('input', (event) => {
     S.search = event.target.value;
