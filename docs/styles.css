@@ -76,6 +76,30 @@ i { color: var(--muted); font-style: italic; }
 .dl-fill { fill: currentColor; stroke: none; }
 .dl-note { font-size: 13px; color: var(--muted); margin: 14px 0 0; }
 
+.browser-btn {
+  display: flex; align-items: center; gap: 13px;
+  margin-top: 12px; padding: 12px 20px; border-radius: 16px;
+  background: rgba(255, 253, 248, .55); border: 1.5px dashed rgba(74, 54, 36, .25);
+  color: var(--ink-2); text-decoration: none;
+  transition: transform .16s ease, border-color .16s ease, background .16s ease;
+}
+.browser-btn:hover { transform: translateY(-2px); border-color: var(--camel); background: var(--paper); }
+.browser-btn .dl-ico { width: 22px; height: 22px; }
+.browser-btn b { font-size: 15px; }
+.browser-btn small { display: block; color: var(--muted); font-size: 12px; }
+.browser-btn em {
+  margin-left: auto; font-style: normal; font-size: 12px;
+  color: var(--camel-deep); white-space: nowrap;
+}
+
+/* browser-mode banner inside the web app */
+body:has(.web-bar) .shell, body:has(.web-bar) .auth { padding-top: 30px; }
+.web-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 400;
+  padding: 6px 14px; font-size: 12px; text-align: center;
+  background: rgba(46, 33, 22, .92); color: #e8d7bb;
+}
+
 .hero-art { position: relative; }
 .window-mock {
   border-radius: 18px; overflow: hidden;

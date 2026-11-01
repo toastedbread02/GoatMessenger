@@ -1,0 +1,2431 @@
+// GoatMessenger renderer: session handling, encrypted messaging, contacts, calls.
+import * as C from '../shared/crypto.mjs';
+import { Api, ApiError } from './api.mjs';
+import { Vault } from './vault.mjs';
+import { CallManager } from './calls.mjs';
+import { Sound } from './sound.mjs';
+import * as D from './dom.mjs';
+
+const { $, el, icon } = D;
+
+const S = {
+  info: null,
+  api: null,
+  vault: null,
+  sound: new Sound(),
+  calls: null,
+  identity: null,
+  me: null,
+  contacts: new Map(),      // username -> contact record
+  bundles: new Map(),       // username -> public key bundle
+  messages: new Map(),      // username -> message records (decrypted, local)
+  verified: new Map(),      // username -> timestamp
+  presence: new Map(),      // username -> bool
+  typingUntil: new Map(),   // username -> ms
+  typingSent: 0,
+  typingTimer: null,
+  unread: new Map(),
+  readUpTo: new Map(),      // peer -> highest seq they have read
+  activePeer: null,
+  search: '',
+  authMode: 'signin',
+  booted: false,
+  mediaCache: new Map(),    // fileId -> object URL
+  recorder: null,
+  recordingTimer: null,
+  droppedEnvelopes: 0,
+  themeMode: 'system',
+  settingsCat: 'account',
+};
+
+const EMOJI = ['🐐', '🐑', '🌿', '🌾', '🔥', '✨', '😄', '😂', '🥹', '😎', '🤝', '👋', '👍', '🙏', '💚', '💛',
+  '🧡', '❤️', '🎉', '☕️', '🍞', '🧀', '🥛', '🥕', '🌰', '🗻', '⛰️', '🌙', '☀️', '🌧️', '🔔', '🎵',
+  '📎', '📷', '🎥', '📞', '💬', '🤔', '😴', '😭', '🫶', '🫡', '🐐'];
+
+/* ================================================================ utilities */
+
+function toast(message, kind = '') {
+  const node = el('div', { class: `toast ${kind}`, text: message });
+  $('#toasts').append(node);
+  setTimeout(() => {
+    node.style.transition = 'opacity .3s, transform .3s';
+    node.style.opacity = '0';
+    node.style.transform = 'translateY(6px)';
+    setTimeout(() => node.remove(), 320);
+  }, 2800);
+}
+
+function showBootNote(text) { $('#boot-note').textContent = text; }
+
+/* ==================================================================== theme */
+
+function resolveDark(mode) {
+  return mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+function applyTheme(mode) {
+  S.themeMode = ['light', 'dark', 'system'].includes(mode) ? mode : 'system';
+  try { localStorage.setItem('gm:theme', S.themeMode); } catch {}
+  const dark = resolveDark(S.themeMode);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+  window.goat?.setTheme?.(S.themeMode);
+}
+
+function savedTheme() {
+  try { return localStorage.getItem('gm:theme') || 'system'; } catch { return 'system'; }
+}
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (S.themeMode === 'system') applyTheme('system');
+});
+
+const isOnline = (peer) => Boolean(S.presence.get(String(peer).toLowerCase()));
+
+// Ratchet state must never be touched by two async operations at once.
+const locks = new Map();
+function withLock(key, fn) {
+  const prev = locks.get(key) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  locks.set(key, run.then(() => {}, () => {}));
+  return run;
+}
+
+function displayName(peer) {
+  const rec = S.contacts.get(String(peer).toLowerCase());
+  return rec?.displayName || peer;
+}
+
+function accentOf(peer) {
+  return S.contacts.get(String(peer).toLowerCase())?.accent ?? 30;
+}
+
+function unsentTotal() {
+  let n = 0;
+  for (const v of S.unread.values()) n += v;
+  return n;
+}
+
+function syncBadge() {
+  const total = unsentTotal();
+  window.goat?.setBadge?.(total).catch?.(() => {});
+  document.title = total > 0 ? `(${total}) GoatMessenger` : 'GoatMessenger';
+}
+
+/* ==================================================================== modals */
+
+function openModal(content, { onClose } = {}) {
+  const layer = $('#modal-layer');
+  layer.innerHTML = '';
+  layer.append(content);
+  layer.hidden = false;
+  layer.dataset.onclose = '';
+  layer._onClose = onClose || null;
+  return layer;
+}
+
+function closeModal() {
+  const layer = $('#modal-layer');
+  if (layer.hidden) return;
+  layer.hidden = true;
+  layer.innerHTML = '';
+  const cb = layer._onClose;
+  layer._onClose = null;
+  if (cb) cb();
+}
+
+$('#modal-layer').addEventListener('click', (event) => {
+  if (event.target.id === 'modal-layer') closeModal();
+});
+
+function modalShell(title, subtitle, body, actions = []) {
+  const node = el('div', { class: 'modal' },
+    el('h3', { text: title }),
+    subtitle ? el('p', { class: 'sub', text: subtitle }) : null,
+    body,
+    actions.length ? el('div', { class: 'modal-actions' }, ...actions) : null);
+  return node;
+}
+
+/* ====================================================================== auth */
+
+function setAuthMode(mode) {
+  S.authMode = mode;
+  const isSignup = mode === 'signup';
+  D.$$('.tab').forEach((tab) => tab.classList.toggle('is-on', tab.dataset.mode === mode));
+  $('#field-display').hidden = !isSignup;
+  $('#field-pass2').hidden = !isSignup;
+  $('#auth-submit').textContent = isSignup ? 'Create my herd' : 'Sign in';
+  $('#auth-hint').textContent = isSignup
+    ? 'Your passphrase derives your private keys on this device. The relay only ever sees ciphertext.'
+    : 'Your passphrase unlocks your keys and your history. It never leaves this device.';
+  $('#auth-error').hidden = true;
+}
+
+function authError(message) {
+  const node = $('#auth-error');
+  node.textContent = message;
+  node.hidden = false;
+}
+
+function busy(button, label) {
+  button.disabled = true;
+  button.dataset.label = button.textContent;
+  button.textContent = label;
+}
+function unbusy(button) {
+  button.disabled = false;
+  if (button.dataset.label) button.textContent = button.dataset.label;
+}
+
+async function signIn(username, passphrase) {
+  const name = username.trim();
+  if (!name || !passphrase) throw new Error('Enter your goat name and passphrase.');
+  const keys = C.derivePassphraseKeys(passphrase, name);
+  const res = await S.api.login({ username: name, authToken: keys.authToken });
+  if (!res.identityBackup) throw new Error('This account has no key backup on the relay.');
+  let identity;
+  try {
+    identity = C.importIdentity(await C.unwrapIdentity(res.identityBackup, keys.wrapKey));
+  } catch {
+    throw new Error('That passphrase cannot unlock this account.');
+  }
+  await startSession({ username: res.me.username, token: res.token, identity, bootstrap: res, backup: res.identityBackup });
+  return res;
+}
+
+async function signUp(username, passphrase, displayNameValue) {
+  const name = username.trim();
+  if (!/^[a-zA-Z0-9_]{3,24}$/.test(name)) throw new Error('Use 3–24 letters, numbers or underscores.');
+  if (passphrase.length < 8) throw new Error('Please use at least 8 characters for your passphrase.');
+  const keys = C.derivePassphraseKeys(passphrase, name);
+  const identity = C.createIdentity();
+  const backup = await C.wrapIdentity(C.exportIdentity(identity), keys.wrapKey);
+  const res = await S.api.signup({
+    username: name,
+    displayName: (displayNameValue || name).trim(),
+    authToken: keys.authToken,
+    identityBackup: backup,
+    keys: C.publicBundle(identity),
+  });
+  await startSession({ username: res.me.username, token: res.token, identity, bootstrap: res, backup });
+  return res;
+}
+
+async function startSession({ username, token, identity, bootstrap, backup }) {
+  S.api.setToken(token);
+  S.identity = identity;
+  if (S.calls) S.calls.identity = identity;
+  S.vault = new Vault(username);
+  if (backup) await S.vault.saveBackup(backup);
+
+  // Different keys on this device means old ratchets belong to someone else.
+  const fingerprint = C.fingerprintKey(identity.ikPub);
+  const storedFingerprint = await S.vault.identityFingerprint();
+  if (storedFingerprint && storedFingerprint !== fingerprint) {
+    await S.vault.wipeHistory();
+    toast('This Mac held keys for a different identity — local history was reset.', 'err');
+  }
+  await S.vault.setIdentityFingerprint(fingerprint);
+
+  S.me = bootstrap.me;
+  S.contacts.clear();
+  S.bundles.clear();
+  S.messages.clear();
+  S.unread.clear();
+  S.presence.clear();
+  S.verified.clear();
+  S.readUpTo.clear();
+  S.typingUntil.clear();
+
+  const verifiedMap = await S.vault.verifiedAll();
+  for (const [peer, at] of Object.entries(verifiedMap || {})) S.verified.set(peer, at);
+  applyBootstrap(bootstrap);
+
+  const prefs = await S.vault.prefs();
+  if (prefs.unread) {
+    for (const [peer, count] of Object.entries(prefs.unread)) S.unread.set(peer, count);
+  }
+  if (prefs.theme) applyTheme(prefs.theme);
+
+  localStorage.setItem('gm:lastUser', username);
+  // Stay signed in on relaunch: token + private identity go to the OS keychain.
+  try { await window.goat?.session?.save?.({ username: S.me.username, token, identity: C.exportIdentity(identity) }); } catch {}
+
+  $('#auth').hidden = true;
+  $('#shell').hidden = false;
+  renderMe();
+  renderChatList();
+  syncBadge();
+
+  wireApi();
+  S.api.connect();
+
+  const last = prefs.lastPeer && S.contacts.has(prefs.lastPeer) && S.contacts.get(prefs.lastPeer).state === 'accepted'
+    ? prefs.lastPeer : null;
+  if (last) await openChat(last, { silent: true });
+  else showEmpty();
+
+  setTimeout(() => $('#composer-input')?.focus(), 200);
+}
+
+/* ================================================================ bootstrap */
+
+function applyBootstrap(data) {
+  if (data.me) S.me = data.me;
+  if (!data.contacts) return;
+  S.contacts.clear();
+  for (const contact of data.contacts) {
+    S.contacts.set(contact.username.toLowerCase(), contact);
+    if (contact.presence) S.presence.set(contact.username.toLowerCase(), contact.presence === 'online');
+  }
+  renderChatList();
+  renderRequests();
+  if (S.activePeer) {
+    renderHeader();
+    renderConversation({ scroll: false });
+  }
+  syncBadge();
+}
+
+async function refreshBootstrap() {
+  try {
+    applyBootstrap(await S.api.bootstrap());
+  } catch (err) {
+    if (err.status === 401) handleUnauthorized();
+  }
+}
+
+/* ======================================================================= ws */
+
+function wireApi() {
+  S.api.onStatus = (status) => {
+    $('#me-status').innerHTML = '';
+    const dot = el('i', { class: 'dot' });
+    const label = el('span', { text: status === 'online' ? 'Connected · encrypted' : 'Reconnecting…' });
+    $('#me-status').classList.toggle('offline', status !== 'online');
+    $('#me-status').append(dot, label);
+  };
+  S.api.onEvent = handleWsEvent;
+}
+
+async function handleWsEvent(msg) {
+  switch (msg.t) {
+    case 'ready':
+      if (msg.me) { S.me = { ...S.me, ...msg.me }; renderMe(); }
+      // Anything that happened while we were disconnected (contact requests,
+      // profile edits) is only visible in a fresh snapshot.
+      await refreshBootstrap();
+      break;
+    case 'presence-list':
+      for (const peer of msg.online || []) S.presence.set(String(peer).toLowerCase(), true);
+      renderChatList();
+      renderHeader();
+      break;
+    case 'presence': {
+      const peer = String(msg.user).toLowerCase();
+      S.presence.set(peer, Boolean(msg.online));
+      renderChatList();
+      if (S.activePeer === peer) renderHeader();
+      break;
+    }
+    case 'message':
+      await receiveMessage(msg.msg);
+      break;
+    case 'typing': {
+      const peer = String(msg.from).toLowerCase();
+      S.typingUntil.set(peer, msg.on ? Date.now() + 3200 : 0);
+      if (S.activePeer === peer) renderTyping();
+      renderChatList();
+      setTimeout(() => {
+        if (S.activePeer === peer) renderTyping();
+        renderChatList();
+      }, 3300);
+      break;
+    }
+    case 'read':
+      await applyReadReceipt(String(msg.from).toLowerCase(), msg.upTo);
+      break;
+    case 'contact-request':
+      toast(`${msg.user.displayName || msg.user.username} wants to join your herd.`);
+      await refreshBootstrap();
+      break;
+    case 'contact-accepted':
+      toast(`${msg.user.displayName || msg.user.username} accepted. Say hello!`);
+      await refreshBootstrap();
+      break;
+    case 'contact-removed':
+      toast(`${msg.user} left your herd.`);
+      await refreshBootstrap();
+      break;
+    case 'profile': {
+      const peer = msg.user.username.toLowerCase();
+      const existing = S.contacts.get(peer);
+      if (existing) Object.assign(existing, { displayName: msg.user.displayName, about: msg.user.about, accent: msg.user.accent });
+      renderChatList();
+      if (S.activePeer === peer) renderHeader();
+      break;
+    }
+    case 'call':
+      await S.calls.handle(msg);
+      break;
+    case 'call-error':
+      toast(msg.reason || 'Call failed.', 'err');
+      break;
+    case 'unauthorized':
+      handleUnauthorized();
+      break;
+    default:
+      break;
+  }
+}
+
+function handleUnauthorized() {
+  toast('Session expired. Please sign in again.', 'err');
+  S.api.close();
+  $('#shell').hidden = true;
+  $('#auth').hidden = false;
+  const user = localStorage.getItem('gm:lastUser') || '';
+  if (user) $('#auth-username').value = user;
+}
+
+/* =================================================================== crypto */
+
+async function peerBundle(peer, { force = false } = {}) {
+  const key = String(peer).toLowerCase();
+  if (!force && S.bundles.has(key)) return S.bundles.get(key);
+  const res = await S.api.keys(peer);
+  C.verifyBundle(res.keys);
+  S.bundles.set(key, res.keys);
+  return res.keys;
+}
+
+async function ensureSession(peer) {
+  const key = String(peer).toLowerCase();
+  let state = await S.vault.loadSession(key);
+  if (!state) {
+    const bundle = await peerBundle(key);
+    state = C.initiatorSession(S.identity, bundle);
+    await S.vault.saveSession(key, state);
+  }
+  return state;
+}
+
+async function sendPayload(peer, kind, payload) {
+  const key = String(peer).toLowerCase();
+  const clientId = D.randomId(8);
+  const envelope = await withLock(key, async () => {
+    const state = await ensureSession(key);
+    const env = await C.encryptMessage(state, { kind, ...payload });
+    await S.vault.saveSession(key, state);
+    return env;
+  });
+
+  const record = {
+    id: null,
+    clientId,
+    peer: key,
+    dir: 'out',
+    from: S.me.username.toLowerCase(),
+    ts: Date.now(),
+    kind,
+    payload,
+    status: 'sending',
+  };
+  pushRecord(key, record);
+  renderChatList();
+  if (S.activePeer === key) renderConversation({ scroll: 'bottom' });
+
+  try {
+    const res = await S.api.sendMessage(key, envelope, clientId);
+    reconcileSent(key, clientId, res.msg);
+    S.sound.sent();
+  } catch (err) {
+    updateRecord(key, (r) => r.clientId === clientId, (r) => { r.status = 'failed'; });
+    renderChatList();
+    if (S.activePeer === key) renderConversation({ scroll: false });
+    toast(err.message || 'Message failed to send.', 'err');
+    throw err;
+  }
+  return record;
+}
+
+function pushRecord(peer, record) {
+  const list = S.messages.get(peer) || [];
+  list.push(record);
+  list.sort((a, b) => (a.ts - b.ts) || String(a.id).localeCompare(String(b.id)));
+  S.messages.set(peer, list);
+  persist(peer);
+}
+
+function updateRecord(peer, match, mutate) {
+  const list = S.messages.get(peer) || [];
+  const target = list.find(match);
+  if (!target) return false;
+  mutate(target);
+  persist(peer);
+  return true;
+}
+
+function reconcileSent(peer, clientId, serverMsg) {
+  updateRecord(peer, (r) => r.clientId === clientId && r.dir === 'out', (r) => {
+    r.id = serverMsg.id;
+    r.seq = serverMsg.seq;
+    r.ts = serverMsg.ts;
+    r.status = (S.readUpTo.get(peer) || 0) >= serverMsg.seq ? 'read' : 'sent';
+  });
+  renderChatList();
+  if (S.activePeer === peer) renderConversation({ scroll: false });
+}
+
+const persistTimers = new Map();
+function persist(peer) {
+  clearTimeout(persistTimers.get(peer));
+  persistTimers.set(peer, setTimeout(() => {
+    const list = S.messages.get(peer) || [];
+    S.vault.saveMessages(peer, list).catch(() => {});
+  }, 200));
+}
+
+async function receiveMessage(msg) {
+  if (!msg || !msg.env) return;
+  const peer = String(msg.from).toLowerCase();
+  if (peer === S.me.username.toLowerCase()) {
+    // echo of our own message on another device/socket
+    if (msg.clientId) reconcileSent(String(msg.to).toLowerCase(), msg.clientId, msg);
+    return;
+  }
+  const existing = (S.messages.get(peer) || []).find((r) => r.id === msg.id);
+  if (existing) return;
+
+  let payload;
+  try {
+    payload = await withLock(peer, async () => {
+      let state = await S.vault.loadSession(peer);
+      let clear;
+      if (!state) {
+        if (msg.env.type !== 'prekey') throw new Error('missing session');
+        await checkPrekeyIdentity(peer, msg.env.prekey);
+        state = C.responderSession(S.identity, msg.env.prekey);
+        clear = await C.decryptMessage(state, msg.env);
+        await S.vault.saveSession(peer, state);
+      } else {
+        try {
+          clear = await C.decryptMessage(state, msg.env);
+        } catch (err) {
+          if (msg.env.type !== 'prekey') throw err;
+          await checkPrekeyIdentity(peer, msg.env.prekey);
+          state = C.responderSession(S.identity, msg.env.prekey);
+          clear = await C.decryptMessage(state, msg.env);
+          await S.vault.saveSession(peer, state);
+        }
+      }
+      if (state.pendingPrekey) {
+        C.confirmSession(state);
+        await S.vault.saveSession(peer, state);
+      }
+      return clear;
+    });
+  } catch (err) {
+    S.droppedEnvelopes++;
+    console.warn('could not decrypt message from', peer, err.message);
+    return;
+  }
+
+  if (!S.contacts.has(peer)) {
+    await refreshBootstrap();
+  }
+
+  const record = {
+    id: msg.id,
+    clientId: msg.clientId || null,
+    peer,
+    dir: 'in',
+    from: peer,
+    ts: msg.ts,
+    seq: msg.seq,
+    kind: payload.kind || 'text',
+    payload,
+    status: 'delivered',
+  };
+  pushRecord(peer, record);
+
+  const isActive = S.activePeer === peer;
+  if (isActive) {
+    S.sound.received();
+    sendRead(peer, msg.seq);
+  } else {
+    S.unread.set(peer, (S.unread.get(peer) || 0) + 1);
+    S.sound.received();
+    rememberUnread();
+  }
+  renderChatList();
+  if (S.activePeer === peer) renderConversation({ scroll: 'bottom' });
+  syncBadge();
+}
+
+async function checkPrekeyIdentity(peer, prekey) {
+  try {
+    const bundle = await peerBundle(peer, { force: !S.bundles.has(peer) });
+    if (bundle.ik !== prekey.ik) throw new Error('peers key does not match the pinned bundle');
+  } catch (err) {
+    throw new Error(`Identity check failed for ${peer}`);
+  }
+}
+
+async function applyReadReceipt(peer, upTo) {
+  // A read event can arrive before our own POST resolves (the relay pushes to
+  // the reader first), so remember the watermark and apply it on reconcile too.
+  S.readUpTo.set(peer, Math.max(S.readUpTo.get(peer) || 0, upTo || 0));
+  const list = S.messages.get(peer) || [];
+  let changed = false;
+  for (const rec of list) {
+    if (rec.dir === 'out' && rec.seq && rec.seq <= upTo && rec.status !== 'read') {
+      rec.status = 'read';
+      changed = true;
+    }
+  }
+  if (changed) {
+    await S.vault.saveMessages(peer, list);
+    if (S.activePeer === peer) renderConversation({ scroll: false });
+  }
+}
+
+function sendRead(peer, upTo) {
+  if (!upTo) return;
+  S.api.sendWs({ t: 'read', to: peer, upTo });
+}
+
+function rememberUnread() {
+  const obj = Object.fromEntries([...S.unread.entries()].filter(([, n]) => n > 0));
+  S.vault.setPref('unread', obj).catch(() => {});
+}
+
+/* ================================================================ rendering */
+
+function renderMe() {
+  const me = S.me;
+  D.paintAvatar($('#me-avatar'), { name: me.displayName || me.username, accent: me.accent });
+  $('#me-name').textContent = me.displayName || me.username;
+  if (S.api?.ws && S.api.ws.readyState === WebSocket.OPEN) {
+    $('#me-status').innerHTML = '';
+    $('#me-status').classList.remove('offline');
+    $('#me-status').append(el('i', { class: 'dot' }), el('span', { text: 'Connected · encrypted' }));
+  }
+}
+
+// Keyed DOM state: contact rows and messages keep their live DOM node until
+// their content actually changes, so sends, receipts and presence ticks no
+// longer flash the whole list.
+const chatState = { rows: new Map(), hint: null };
+const convState = { peer: null, rows: new Map() };
+
+function stripAnim(node) { node.style.animation = 'none'; return node; }
+
+function contactRowSig(peer) {
+  const rec = S.contacts.get(peer);
+  const list = S.messages.get(peer) || [];
+  const last = list[list.length - 1];
+  return JSON.stringify([
+    S.activePeer === peer,
+    rec?.displayName, rec?.accent, isOnline(peer),
+    last?.ts || rec?.last?.ts || rec?.since || 0, rec?.since,
+    (S.typingUntil.get(peer) || 0) > Date.now(),
+    last ? previewText(last) : '',
+    S.unread.get(peer) || 0,
+  ]);
+}
+
+function contactRow(peer, { fresh = true } = {}) {
+  const rec = S.contacts.get(peer);
+  if (!rec) return null;
+  const list = S.messages.get(peer) || [];
+  const last = list[list.length - 1];
+  const unread = S.unread.get(peer) || 0;
+
+  const row = el('div', {
+    class: `chat-row${S.activePeer === peer ? ' is-active' : ''}`,
+    dataset: { peer },
+  });
+  const avatar = el('div', { class: 'avatar' });
+  D.paintAvatar(avatar, {
+    name: rec.displayName || rec.username, accent: rec.accent, online: isOnline(peer), showPresence: true,
+  });
+  const main = el('div', { class: 'chat-main' });
+  const top = el('div', { class: 'chat-top' },
+    el('div', { class: 'chat-name', text: rec.displayName || rec.username }),
+    el('div', { class: 'chat-time', text: D.shortRelative(last?.ts || rec.last?.ts || rec.since) }));
+  const preview = el('div', { class: 'chat-preview' });
+  const typing = (S.typingUntil.get(peer) || 0) > Date.now();
+  if (typing) {
+    preview.append(el('em', { text: 'typing…' }));
+  } else if (last) {
+    preview.append(icon('lock', 'lockmini'), document.createTextNode(previewText(last)));
+  } else {
+    preview.append(el('span', { text: 'No messages yet' }));
+  }
+  main.append(top, preview);
+  row.append(avatar, main);
+  if (unread > 0) row.append(el('div', { class: 'badge', text: String(unread) }));
+  row.addEventListener('click', () => openChat(peer));
+  if (!fresh) stripAnim(row);
+  return row;
+}
+
+function previewText(rec) {
+  const prefix = rec.dir === 'out' ? 'You: ' : '';
+  const p = rec.payload || {};
+  switch (rec.kind) {
+    case 'image': return `${prefix}📷 Photo`;
+    case 'file': return `${prefix}📎 ${p.name || 'File'}`;
+    case 'voice': return `${prefix}🎙 Voice note`;
+    case 'call': return `${prefix}${callNoteText(p)}`;
+    default: return prefix + String(p.text || '').replace(/\s+/g, ' ').slice(0, 90);
+  }
+}
+
+function callNoteText(p) {
+  const kind = p.callKind === 'video' ? 'Video call' : 'Call';
+  switch (p.outcome) {
+    case 'completed': return `${kind} · ${D.duration(p.durationSec || 0)}`;
+    case 'declined': return `${kind} declined`;
+    case 'missed': return `Missed ${kind.toLowerCase()}`;
+    case 'no-answer': return `No answer`;
+    case 'cancelled': return `${kind} cancelled`;
+    default: return `${kind} failed`;
+  }
+}
+
+function renderChatList() {
+  const box = $('#chat-list');
+  const query = S.search.trim().toLowerCase();
+  const accepted = [...S.contacts.values()].filter((c) => c.state === 'accepted');
+
+  const scored = accepted.filter((c) => {
+    if (!query) return true;
+    if ((c.displayName || c.username).toLowerCase().includes(query)) return true;
+    if (c.username.toLowerCase().includes(query)) return true;
+    const msgs = S.messages.get(c.username.toLowerCase()) || [];
+    return msgs.some((m) => String(m.payload?.text || '').toLowerCase().includes(query));
+  }).sort((a, b) => {
+    const la = (S.messages.get(a.username.toLowerCase())?.at(-1)?.ts) || a.last?.ts || a.since || 0;
+    const lb = (S.messages.get(b.username.toLowerCase())?.at(-1)?.ts) || b.last?.ts || b.since || 0;
+    return lb - la;
+  });
+
+  const wanted = new Set();
+  const seq = [];
+  for (const contact of scored) {
+    const peer = contact.username.toLowerCase();
+    wanted.add(peer);
+    const sig = contactRowSig(peer);
+    let item = chatState.rows.get(peer);
+    if (!item) {
+      const node = contactRow(peer);
+      if (!node) continue;
+      item = { sig, node };
+      chatState.rows.set(peer, item);
+    } else if (item.sig !== sig) {
+      const node = contactRow(peer, { fresh: false });
+      if (node) {
+        item.node.replaceWith(node);
+        item.node = node;
+        item.sig = sig;
+      }
+    }
+    seq.push(item.node);
+  }
+  for (const [peer, item] of chatState.rows) {
+    if (!wanted.has(peer)) { item.node.remove(); chatState.rows.delete(peer); }
+  }
+
+  if (!seq.length) {
+    const text = query ? 'No goats match that.' : 'No goats yet — tap + to find one.';
+    if (!chatState.hint || chatState.hint._text !== text) {
+      chatState.hint?.remove();
+      chatState.hint = el('div', { class: 'chat-preview', style: { padding: '18px 12px', textAlign: 'center' } });
+      chatState.hint.append(el('span', { text }));
+      chatState.hint._text = text;
+    }
+    box.append(chatState.hint);
+  } else if (chatState.hint) {
+    chatState.hint.remove();
+    chatState.hint = null;
+  }
+
+  for (const node of seq) box.append(node);
+}
+
+function renderRequests() {
+  const box = $('#requests');
+  box.innerHTML = '';
+  const incoming = [...S.contacts.values()].filter((c) => c.state === 'in');
+  const outgoing = [...S.contacts.values()].filter((c) => c.state === 'out');
+  if (!incoming.length && !outgoing.length) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  for (const req of incoming) {
+    const card = el('div', { class: 'request-card' });
+    const avatar = el('div', { class: 'avatar' });
+    D.paintAvatar(avatar, { name: req.displayName || req.username, accent: req.accent });
+    card.append(avatar,
+      el('div', { class: 'request-text' },
+        el('b', { text: req.displayName || req.username }),
+        el('span', { text: 'wants to connect' })),
+      el('div', { class: 'request-actions' },
+        el('button', { class: 'mini quiet', text: 'No', onclick: () => declineRequest(req.username) }),
+        el('button', { class: 'mini', text: 'Accept', onclick: () => acceptRequest(req.username) })));
+    box.append(card);
+  }
+  for (const req of outgoing) {
+    const card = el('div', { class: 'request-card' });
+    const avatar = el('div', { class: 'avatar' });
+    D.paintAvatar(avatar, { name: req.displayName || req.username, accent: req.accent });
+    card.append(avatar,
+      el('div', { class: 'request-text' },
+        el('b', { text: req.displayName || req.username }),
+        el('span', { text: 'request sent · waiting' })),
+      el('div', { class: 'request-actions' },
+        el('button', { class: 'mini quiet', text: 'Cancel', onclick: () => declineRequest(req.username) })));
+    box.append(card);
+  }
+}
+
+async function acceptRequest(peer) {
+  try {
+    const data = await S.api.acceptContact(peer);
+    applyBootstrap(data);
+    toast(`Connected with ${displayName(peer)}.`);
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+async function declineRequest(peer) {
+  try {
+    applyBootstrap(await S.api.removeContact(peer));
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+function renderHeader() {
+  const peer = S.activePeer;
+  if (!peer) return;
+  const rec = S.contacts.get(peer);
+  const avatar = $('#peer-avatar');
+  D.paintAvatar(avatar, { name: rec?.displayName || peer, accent: rec?.accent, online: isOnline(peer), showPresence: true });
+  $('#peer-name').textContent = rec?.displayName || peer;
+
+  const sub = $('#peer-sub');
+  sub.innerHTML = '';
+  const typing = (S.typingUntil.get(peer) || 0) > Date.now();
+  if (typing) {
+    sub.append(el('span', { text: `${rec?.displayName || peer} is typing…` }));
+  } else {
+    sub.append(
+      el('i', { class: `dot${isOnline(peer) ? '' : ' off'}` }),
+      el('span', { text: isOnline(peer) ? 'Online' : 'Offline' }),
+      el('span', { text: '·' }),
+      el('span', { text: 'end-to-end encrypted' }),
+    );
+  }
+  $('#btn-verify').title = S.verified.has(peer) ? 'Verified encryption' : 'Encryption and safety number';
+}
+
+function renderTyping() {
+  const peer = S.activePeer;
+  const row = $('#typing-row');
+  if (!peer) { row.hidden = true; return; }
+  const active = (S.typingUntil.get(peer) || 0) > Date.now();
+  row.hidden = !active;
+  if (active) $('#typing-name').textContent = `${displayName(peer)} is typing…`;
+}
+
+function messageMeta(rec) {
+  const meta = el('span', { class: 'meta' }, document.createTextNode(D.clockTime(rec.ts)));
+  if (rec.dir === 'out') {
+    if (rec.status === 'sending') meta.append(icon('check'));
+    else if (rec.status === 'sent') meta.append(icon('check'));
+    else if (rec.status === 'delivered') meta.append(icon('checks'));
+    else if (rec.status === 'read') meta.append(icon('checks', 'read'));
+    else if (rec.status === 'failed') meta.append(el('span', { text: '· not sent' }));
+  }
+  return meta;
+}
+
+function bubbleFor(rec) {
+  const bubble = el('div', { class: 'bubble' });
+  const payload = rec.payload || {};
+
+  if (rec.kind === 'call') {
+    bubble.append(el('div', { class: 'call-note' }, icon('phone'),
+      el('span', { text: callNoteText(payload) })), messageMeta(rec));
+    return bubble;
+  }
+
+  if (rec.kind === 'image' || rec.kind === 'file') {
+    bubble.classList.add('has-media');
+    if (payload.caption) bubble.append(el('div', { class: 'caption', text: payload.caption }));
+    const holder = el('div', { class: 'media-slot' });
+    bubble.append(holder);
+    if (rec.kind === 'image') {
+      holder.append(el('div', { class: 'media-loading', text: 'Decrypting…' }));
+    } else {
+      const card = el('div', { class: 'file-card' },
+        el('div', { class: 'file-icon' }, icon('clip')),
+        el('div', {},
+          el('div', { class: 'file-name', text: payload.name || 'File' }),
+          el('div', { class: 'file-size', text: D.fileSize(payload.size) })));
+      const save = el('button', { class: 'icon-btn', title: 'Save to disk', onclick: () => downloadAttachment(rec) }, icon('download'));
+      card.append(save);
+      holder.append(card);
+    }
+    bubble.append(messageMeta(rec));
+    hydrate(rec, holder);
+    return bubble;
+  }
+
+  if (rec.kind === 'voice') {
+    bubble.append(buildVoice(rec), messageMeta(rec));
+    return bubble;
+  }
+
+  bubble.innerHTML = D.linkify(String(payload.text || ''));
+  bubble.append(messageMeta(rec));
+  return bubble;
+}
+
+async function hydrate(rec, holder) {
+  if (rec.kind !== 'image') return;
+  try {
+    const url = await attachmentUrl(rec);
+    const img = el('img', { class: 'media-image', src: url, alt: rec.payload.name || 'photo' });
+    img.addEventListener('click', () => openLightbox(url, rec));
+    holder.innerHTML = '';
+    holder.append(img);
+    if (S.activePeer) {
+      const box = $('#messages');
+      if (D.atBottom(box, 160)) D.scrollToBottom(box, false);
+    }
+  } catch (err) {
+    holder.innerHTML = '';
+    holder.append(el('div', { class: 'media-loading', text: 'Image unavailable' }));
+  }
+}
+
+async function attachmentUrl(rec) {
+  const id = rec.payload.fileId;
+  if (S.mediaCache.has(id)) return S.mediaCache.get(id);
+  const bytes = await S.api.download(id);
+  const plain = await C.decryptBytes(rec.payload.key, bytes);
+  const blob = new Blob([plain], { type: rec.payload.mime || 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  if (S.mediaCache.size > 40) {
+    const [oldKey, oldUrl] = S.mediaCache.entries().next().value;
+    URL.revokeObjectURL(oldUrl);
+    S.mediaCache.delete(oldKey);
+  }
+  S.mediaCache.set(id, url);
+  return url;
+}
+
+function buildVoice(rec) {
+  const wrap = el('div', { class: 'voice-card' });
+  const btn = el('button', { class: 'voice-play', type: 'button' }, icon('play'));
+  const bars = el('div', { class: 'voice-bars' });
+  for (let i = 0; i < 26; i++) {
+    const h = 6 + Math.round(Math.abs(Math.sin(i * 1.7)) * 18);
+    bars.append(el('i', { style: { height: `${h}px` } }));
+  }
+  const time = el('div', { class: 'voice-time', text: D.duration(rec.payload.duration || 0) });
+  const audio = el('audio', { preload: 'none' });
+  let loaded = false;
+  let playing = false;
+
+  const ensureSource = async () => {
+    if (loaded) return;
+    const url = await attachmentUrl(rec);
+    audio.src = url;
+    loaded = true;
+  };
+
+  btn.addEventListener('click', async () => {
+    try {
+      await ensureSource();
+      if (playing) { audio.pause(); return; }
+      await audio.play();
+    } catch {
+      toast('Could not play this voice note.', 'err');
+    }
+  });
+  audio.addEventListener('play', () => {
+    playing = true;
+    btn.innerHTML = '';
+    btn.append(icon('pause'));
+  });
+  audio.addEventListener('pause', () => {
+    playing = false;
+    btn.innerHTML = '';
+    btn.append(icon('play'));
+  });
+  audio.addEventListener('timeupdate', () => {
+    const total = audio.duration || rec.payload.duration || 1;
+    const progress = audio.currentTime / total;
+    Array.from(bars.children).forEach((bar, i) => bar.classList.toggle('on', i / bars.children.length <= progress));
+    time.textContent = D.duration(Math.max(0, total - audio.currentTime));
+  });
+  audio.addEventListener('ended', () => {
+    time.textContent = D.duration(rec.payload.duration || 0);
+    Array.from(bars.children).forEach((bar) => bar.classList.remove('on'));
+  });
+
+  wrap.append(btn, bars, time, audio);
+  return wrap;
+}
+
+function convKey(rec) {
+  if (rec.clientId) return `c:${rec.clientId}`;
+  if (rec.id) return `m:${rec.id}`;
+  return `x:${rec.ts}:${rec.kind}:${rec.dir}`;
+}
+
+function rowSig(rec, prev, next) {
+  const samePrev = prev && prev.dir === rec.dir && prev.from === rec.from && rec.ts - prev.ts < 5 * 60 * 1000;
+  const sameNext = next && next.dir === rec.dir && next.from === rec.from && next.ts - rec.ts < 5 * 60 * 1000;
+  return `${D.dayLabel(rec.ts)}|${samePrev ? 1 : 0}${sameNext ? 1 : 0}|${rec.dir}|${rec.status}|${rec.ts}|${rec.id || ''}`;
+}
+
+function messageRowNode(rec, prev, next, { fresh = true } = {}) {
+  const samePrev = prev && prev.dir === rec.dir && prev.from === rec.from && rec.ts - prev.ts < 5 * 60 * 1000;
+  const sameNext = next && next.dir === rec.dir && next.from === rec.from && next.ts - rec.ts < 5 * 60 * 1000;
+  const peer = S.activePeer;
+
+  const row = el('div', {
+    class: [
+      'msg', rec.dir,
+      samePrev ? 'stacked' : 'group-start',
+      sameNext ? 'group-mid' : 'group-end',
+    ].join(' '),
+  });
+  if (rec.dir === 'in') {
+    if (!sameNext) {
+      const avatar = el('div', { class: 'avatar msg-avatar' });
+      D.paintAvatar(avatar, { name: displayName(peer), accent: accentOf(peer) });
+      row.append(avatar);
+    } else {
+      row.append(el('div', { class: 'spacer' }));
+    }
+  }
+  row.append(bubbleFor(rec));
+  if (!fresh) {
+    stripAnim(row);
+    const bubble = row.querySelector('.bubble');
+    if (bubble) stripAnim(bubble);
+  }
+  return row;
+}
+
+function dayDividerNode(day) {
+  const key = `d:${day}`;
+  let item = convState.rows.get(key);
+  if (!item) {
+    item = { sig: day, node: el('div', { class: 'day-divider', text: day }) };
+    convState.rows.set(key, item);
+  }
+  return item.node;
+}
+
+function renderConversation({ scroll = 'bottom' } = {}) {
+  const box = $('#messages');
+  const peer = S.activePeer;
+  if (!peer) return;
+  const wasBottom = D.atBottom(box, 140);
+  if (convState.peer !== peer) {
+    box.innerHTML = '';
+    convState.peer = peer;
+    convState.rows.clear();
+  }
+
+  const list = (S.messages.get(peer) || []).slice().sort((a, b) => (a.ts - b.ts) || String(a.id || '').localeCompare(String(b.id || '')));
+  const wanted = new Set();
+  const seq = [];
+  let lastDay = '';
+  for (let i = 0; i < list.length; i++) {
+    const rec = list[i];
+    const day = D.dayLabel(rec.ts);
+    if (day !== lastDay) {
+      seq.push(dayDividerNode(day));
+      wanted.add(`d:${day}`);
+      lastDay = day;
+    }
+    const key = convKey(rec);
+    wanted.add(key);
+    const sig = rowSig(rec, list[i - 1], list[i + 1]);
+    let item = convState.rows.get(key);
+    if (!item) {
+      item = { sig, node: messageRowNode(rec, list[i - 1], list[i + 1]) };
+      convState.rows.set(key, item);
+    } else if (item.sig !== sig) {
+      const node = messageRowNode(rec, list[i - 1], list[i + 1], { fresh: false });
+      item.node.replaceWith(node);
+      item.node = node;
+      item.sig = sig;
+    }
+    seq.push(item.node);
+  }
+  for (const [key, item] of convState.rows) {
+    if (!wanted.has(key)) { item.node.remove(); convState.rows.delete(key); }
+  }
+
+  const hintText = `This is the start of your encrypted thread with ${displayName(peer)}. Everything here is sealed before it leaves your Mac.`;
+  if (!list.length) {
+    if (!convState.hint || convState.hint._text !== hintText) {
+      convState.hint?.remove();
+      convState.hint = el('div', { class: 'empty-inline' },
+        el('div', { class: 'chat-preview', style: { textAlign: 'center', marginTop: '40px', whiteSpace: 'normal' } }));
+      convState.hint.firstChild.append(el('span', { text: hintText }));
+      convState.hint._text = hintText;
+    }
+    seq.push(convState.hint);
+  } else if (convState.hint) {
+    convState.hint.remove();
+    convState.hint = null;
+  }
+
+  for (const node of seq) box.append(node);
+
+  if (scroll === 'bottom' || (scroll !== false && wasBottom)) {
+    requestAnimationFrame(() => D.scrollToBottom(box, scroll === 'smooth'));
+  }
+}
+
+/* --------------------------------------------------------------- navigation */
+
+async function openChat(peer, { silent = false } = {}) {
+  const key = String(peer).toLowerCase();
+  if (!S.contacts.has(key) || S.contacts.get(key).state !== 'accepted') {
+    toast('Accept the request first to start talking.', 'err');
+    return;
+  }
+  const changed = S.activePeer !== key;
+  S.activePeer = key;
+  S.unread.set(key, 0);
+  rememberUnread();
+  S.vault.setPref('lastPeer', key).catch(() => {});
+
+  $('#pane').hidden = false;
+  $('#empty-state').hidden = true;
+  renderHeader();
+  renderChatList();
+
+  if (!S.messages.has(key) || !S.messages.get(key).length) {
+    S.messages.set(key, await S.vault.loadMessages(key));
+  }
+  renderConversation({ scroll: 'bottom' });
+  renderTyping();
+  if (changed && !silent) S.sound.chatOpen();
+
+  const lastSeq = (S.messages.get(key) || []).reduce((max, r) => Math.max(max, r.seq || 0), 0);
+  if (lastSeq) sendRead(key, lastSeq);
+
+  try {
+    const { messages } = await S.api.history(key, 0);
+    await ingestHistory(key, messages);
+  } catch { /* offline: local history stands */ }
+
+  syncBadge();
+  $('#composer-input').focus();
+}
+
+async function ingestHistory(peer, messages) {
+  if (!messages?.length) return;
+  await withLock(peer, async () => {
+    const known = new Set((S.messages.get(peer) || []).map((r) => r.id).filter(Boolean));
+    const state = await S.vault.loadSession(peer);
+    if (!state) return; // nothing to decrypt with yet
+    let added = 0;
+    for (const msg of messages) {
+      if (known.has(msg.id)) continue;
+      if (msg.from === S.me.username.toLowerCase()) continue;
+      try {
+        const payload = await C.decryptMessage(state, msg.env);
+        const rec = {
+          id: msg.id, peer, dir: 'in', from: peer, ts: msg.ts, seq: msg.seq,
+          kind: payload.kind || 'text', payload, status: 'delivered',
+        };
+        S.messages.get(peer).push(rec);
+        added++;
+      } catch {
+        // Older envelopes we can no longer open (ratchet has advanced). Skip quietly.
+      }
+    }
+    if (added) {
+      await S.vault.saveSession(peer, state);
+      await S.vault.saveMessages(peer, S.messages.get(peer));
+      if (S.activePeer === peer) renderConversation({ scroll: false });
+    }
+  });
+}
+
+function showEmpty() {
+  S.activePeer = null;
+  $('#pane').hidden = true;
+  $('#empty-state').hidden = false;
+  $('#messages').innerHTML = '';
+  renderChatList();
+}
+
+/* ================================================================ composer */
+
+const input = $('#composer-input');
+
+function syncComposerState() {
+  const hasText = input.value.trim().length > 0;
+  $('#btn-send').disabled = !hasText;
+  input.style.height = 'auto';
+  input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+}
+
+input.addEventListener('input', () => {
+  syncComposerState();
+  sendTyping(true);
+});
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    $('#composer').requestSubmit();
+  }
+});
+
+function sendTyping(on) {
+  if (!S.activePeer) return;
+  const now = Date.now();
+  if (on && now - S.typingSent < 1800) {
+    scheduleTypingStop();
+    return;
+  }
+  if (on) {
+    S.typingSent = now;
+    S.api.sendWs({ t: 'typing', to: S.activePeer, on: true });
+  } else {
+    S.api.sendWs({ t: 'typing', to: S.activePeer, on: false });
+  }
+  scheduleTypingStop();
+}
+
+function scheduleTypingStop() {
+  clearTimeout(S.typingTimer);
+  S.typingTimer = setTimeout(() => {
+    if (S.activePeer) S.api.sendWs({ t: 'typing', to: S.activePeer, on: false });
+  }, 2600);
+}
+
+$('#composer').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text || !S.activePeer) return;
+  input.value = '';
+  syncComposerState();
+  sendTyping(false);
+  const peer = S.activePeer;
+  try {
+    await sendPayload(peer, 'text', { text });
+  } catch { /* surfaced by sendPayload */ }
+});
+
+$('#btn-emoji').addEventListener('click', () => {
+  const pop = $('#emoji-pop');
+  if (!pop.hidden) { pop.hidden = true; return; }
+  pop.innerHTML = '';
+  for (const emoji of EMOJI) {
+    pop.append(el('button', {
+      type: 'button',
+      text: emoji,
+      onclick: () => {
+        const start = input.selectionStart || input.value.length;
+        input.value = input.value.slice(0, start) + emoji + input.value.slice(input.selectionEnd || start);
+        input.focus();
+        input.selectionStart = input.selectionEnd = start + emoji.length;
+        syncComposerState();
+      },
+    }));
+  }
+  pop.hidden = false;
+});
+
+document.addEventListener('click', (event) => {
+  const pop = $('#emoji-pop');
+  if (!pop.hidden && !pop.contains(event.target) && !event.target.closest('#btn-emoji')) pop.hidden = true;
+});
+
+/* ------------------------------------------------------------- attachments */
+
+const filePicker = el('input', { type: 'file', style: { display: 'none' } });
+document.body.append(filePicker);
+
+$('#btn-attach').addEventListener('click', () => filePicker.click());
+$('#btn-empty-add').addEventListener('click', openAddContact);
+$('#btn-new-chat').addEventListener('click', openAddContact);
+
+filePicker.addEventListener('change', async () => {
+  const file = filePicker.files?.[0];
+  filePicker.value = '';
+  if (file) await sendFile(file);
+});
+
+/* paste + drag & drop -------------------------------------------------------- */
+
+input.addEventListener('paste', (event) => {
+  const files = [...(event.clipboardData?.files || [])];
+  if (!files.length) return;
+  event.preventDefault();
+  for (const file of files) sendFile(file);
+});
+
+const dropZone = el('div', { class: 'dropzone', hidden: true },
+  el('div', { class: 'dropzone-card' },
+    el('div', { class: 'dropzone-icon' }, icon('clip')),
+    el('div', { class: 'dropzone-text' },
+      el('b', { id: 'drop-title', text: 'Drop to send' }),
+      el('span', { id: 'drop-sub', text: '' }))));
+document.body.append(dropZone);
+
+let dragDepth = 0;
+const canDropFiles = () => Boolean(S.activePeer) && !$('#shell').hidden && $('#modal-layer').hidden;
+
+window.addEventListener('dragover', (event) => {
+  if (!event.dataTransfer?.types?.includes('Files')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+});
+window.addEventListener('dragenter', (event) => {
+  if (!event.dataTransfer?.types?.includes('Files')) return;
+  event.preventDefault();
+  if (!canDropFiles()) return;
+  if (dragDepth++ === 0) {
+    $('#drop-sub').textContent = `Files go encrypted to ${displayName(S.activePeer)}`;
+    dropZone.hidden = false;
+  }
+});
+window.addEventListener('dragleave', () => {
+  if (!dragDepth) return;
+  if (--dragDepth === 0) dropZone.hidden = true;
+});
+window.addEventListener('drop', (event) => {
+  if (!event.dataTransfer?.types?.includes('Files')) return;
+  event.preventDefault();
+  dragDepth = 0;
+  dropZone.hidden = true;
+  const peer = S.activePeer;
+  if (!peer) return;
+  for (const file of event.dataTransfer.files) sendFile(file);
+});
+
+async function sendFile(file) {
+  if (!S.activePeer) return;
+  const peer = S.activePeer;
+  if (file.size > 40 * 1024 * 1024) {
+    toast('Files up to 40 MB, please.', 'err');
+    return;
+  }
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const enc = await C.encryptBytes(bytes);
+    const up = await S.api.upload(enc.data, file.name, file.type || 'application/octet-stream');
+    const kind = (file.type || '').startsWith('image/') ? 'image' : 'file';
+    const payload = {
+      fileId: up.id,
+      key: enc.keyB64,
+      name: file.name,
+      mime: file.type || 'application/octet-stream',
+      size: file.size,
+    };
+    if (kind !== 'image') payload.mime = file.type || 'application/octet-stream';
+    await sendPayload(peer, kind, payload);
+  } catch (err) {
+    toast(err.message || 'Could not send that file.', 'err');
+  }
+}
+
+async function downloadAttachment(rec) {
+  try {
+    const bytes = await S.api.download(rec.payload.fileId);
+    const plain = await C.decryptBytes(rec.payload.key, bytes);
+    if (window.goat?.saveFile) {
+      const res = await window.goat.saveFile(rec.payload.name || 'file', plain.buffer);
+      if (!res.canceled) toast('Saved to disk.');
+    } else {
+      const url = URL.createObjectURL(new Blob([plain]));
+      const a = el('a', { href: url, download: rec.payload.name || 'file' });
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  } catch (err) {
+    toast(err.message || 'Download failed.', 'err');
+  }
+}
+
+function openLightbox(url, rec) {
+  const box = el('div', { class: 'lightbox' },
+    el('button', { class: 'icon-btn close', onclick: () => box.remove() }, icon('x')),
+    el('img', { src: url, alt: '' }),
+    el('button', {
+      class: 'primary save',
+      text: 'Save image',
+      onclick: () => downloadAttachment(rec),
+    }));
+  box.addEventListener('click', (event) => { if (event.target === box) box.remove(); });
+  document.body.append(box);
+}
+
+/* -------------------------------------------------------------- voice notes */
+
+$('#btn-voice').addEventListener('click', async () => {
+  if (S.recorder) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    const startedAt = Date.now();
+    rec.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    rec.onstop = () => {
+      stream.getTracks().forEach((track) => track.stop());
+    };
+    rec.start(200);
+    S.recorder = { rec, chunks, startedAt, stream };
+    $('#record-bar').hidden = false;
+    $('#rec-time').textContent = '0:00';
+    clearInterval(S.recordingTimer);
+    S.recordingTimer = setInterval(() => {
+      if (!S.recorder) return;
+      $('#rec-time').textContent = D.duration((Date.now() - S.recorder.startedAt) / 1000);
+    }, 250);
+  } catch {
+    toast('Microphone unavailable. Check macOS privacy settings.', 'err');
+  }
+});
+
+function stopRecording() {
+  const active = S.recorder;
+  if (!active) return null;
+  clearInterval(S.recordingTimer);
+  S.recorder = null;
+  $('#record-bar').hidden = true;
+  return new Promise((resolve) => {
+    active.rec.onstop = () => {
+      active.stream.getTracks().forEach((track) => track.stop());
+      resolve({ blob: new Blob(active.chunks, { type: active.rec.mimeType || 'audio/webm' }), duration: (Date.now() - active.startedAt) / 1000 });
+    };
+    try { active.rec.stop(); } catch { resolve(null); }
+  });
+}
+
+$('#rec-cancel').addEventListener('click', async () => {
+  const active = S.recorder;
+  if (!active) return;
+  active.rec.onstop = () => active.stream.getTracks().forEach((track) => track.stop());
+  stopRecording();
+  toast('Voice note discarded.');
+});
+
+$('#rec-send').addEventListener('click', async () => {
+  const peer = S.activePeer;
+  const result = await stopRecording();
+  if (!result || !result.blob.size || !peer) return;
+  try {
+    const bytes = new Uint8Array(await result.blob.arrayBuffer());
+    const enc = await C.encryptBytes(bytes);
+    const up = await S.api.upload(enc.data, 'voice-note.webm', 'audio/webm');
+    await sendPayload(peer, 'voice', {
+      fileId: up.id,
+      key: enc.keyB64,
+      mime: 'audio/webm',
+      duration: Math.max(1, Math.round(result.duration)),
+      size: result.blob.size,
+    });
+  } catch (err) {
+    toast(err.message || 'Could not send voice note.', 'err');
+  }
+});
+
+/* ================================================================== contacts */
+
+function openAddContact() {
+  const input = el('input', { placeholder: 'goatname', spellcheck: 'false', autocapitalize: 'none' });
+  const results = el('div', { class: 'picker-list' });
+  const status = el('p', { class: 'auth-hint', text: 'Type a goat name and press Enter.' });
+
+  const search = async () => {
+    const name = input.value.trim();
+    results.innerHTML = '';
+    if (!name) return;
+    try {
+      const found = await S.api.lookup(name);
+      const row = el('div', { class: 'picker-row' });
+      const avatar = el('div', { class: 'avatar' });
+      D.paintAvatar(avatar, { name: found.user.displayName, accent: found.user.accent });
+      row.append(avatar, el('div', { class: 'chat-name', text: found.user.displayName }),
+        el('span', { class: 'chip', text: found.state === 'accepted' ? 'connected' : found.state === 'in' ? 'wants you' : found.user.presence }));
+      row.addEventListener('click', async () => {
+        try {
+          if (found.isSelf) return toast('That is you, silly goat.');
+          if (found.state === 'accepted') { closeModal(); await openChat(found.user.username); return; }
+          if (found.state === 'in') await acceptRequest(found.user.username);
+          else if (found.state === 'out') return toast('Request already sent.');
+          else {
+            applyBootstrap(await S.api.addContact(found.user.username));
+            toast(`Request sent to ${found.user.displayName}.`);
+          }
+          closeModal();
+        } catch (err) { toast(err.message, 'err'); }
+      });
+      results.append(row);
+    } catch (err) {
+      status.textContent = err.message;
+    }
+  };
+
+  input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); search(); } });
+
+  const body = el('div', {},
+    el('label', { class: 'field' }, el('span', { text: 'Find a goat' }), input),
+    status, results);
+
+  const modal = modalShell('Grow the herd', 'Invite someone by their goat name. They must accept before you can talk.', body);
+  openModal(modal);
+  setTimeout(() => input.focus(), 60);
+}
+
+/* ------------------------------------------------------------------ settings */
+
+// Relay + TURN: the two addresses that let two goats in different countries
+// reach each other. Messages ride the relay (ciphertext only); calls use TURN.
+function netBlock() {
+  const net = S.info.net || {};
+  const relayInput = el('input', {
+    value: net.relayUrl || '',
+    placeholder: 'http://203.0.113.10:4040',
+    spellcheck: 'false',
+  });
+  const turnInput = el('input', {
+    value: net.turn?.urls || '',
+    placeholder: 'turn:203.0.113.10:3478?transport=udp',
+    spellcheck: 'false',
+  });
+  const userInput = el('input', { value: net.turn?.username || '', placeholder: 'goat', spellcheck: 'false' });
+  const passInput = el('input', { type: 'password', value: net.turn?.credential || '', placeholder: 'password' });
+  const forceBox = el('input', { type: 'checkbox' });
+  forceBox.checked = Boolean(net.forceRelay);
+  const status = el('div', {
+    class: 'net-status',
+    text: net.embedded ? 'Using the relay inside this Mac.' : `Using ${net.relayUrl}.`,
+  });
+
+  const apply = el('button', {
+    class: 'primary small',
+    type: 'button',
+    text: 'Apply',
+    onclick: async () => {
+      apply.disabled = true;
+      status.textContent = 'Checking the relay…';
+      status.className = 'net-status';
+      try {
+        const res = await window.goat.net.set({
+          relayUrl: relayInput.value,
+          turn: { urls: turnInput.value, username: userInput.value, credential: passInput.value },
+          forceRelay: forceBox.checked,
+        });
+        if (!res.ok) {
+          status.textContent = res.error;
+          status.className = 'net-status bad';
+          return;
+        }
+        S.info.net = { ...(S.info.net || {}), ...res.net };
+        S.calls?.setNetwork({ turn: res.net.turn, forceRelay: res.net.forceRelay });
+        status.textContent = res.restartNeeded
+          ? 'Saved. Quit and reopen GoatMessenger to switch relays.'
+          : 'Saved. Calls will use these settings now.';
+        status.className = 'net-status good';
+      } catch (err) {
+        status.textContent = err.message;
+        status.className = 'net-status bad';
+      } finally {
+        apply.disabled = false;
+      }
+    },
+  });
+
+  const test = el('button', {
+    class: 'ghost',
+    type: 'button',
+    text: 'Test',
+    onclick: async () => {
+      status.textContent = 'Testing…';
+      status.className = 'net-status';
+      const res = await window.goat.net.test(relayInput.value);
+      status.textContent = res.ok
+        ? `Relay answered in ${res.ms} ms${res.turn ? ' · TURN enabled' : ''}`
+        : res.error;
+      status.className = `net-status ${res.ok ? 'good' : 'bad'}`;
+    },
+  });
+
+  return el('div', { class: 'net-block' },
+    el('div', { class: 'net-head' },
+      icon('users'),
+      el('div', {},
+        el('div', { text: 'Relay & calls across the world' }),
+        el('small', { text: 'Point both goats at the same relay and TURN server' }))),
+    el('label', { class: 'field' }, el('span', { text: 'Relay address (blank = this Mac)' }), relayInput),
+    el('label', { class: 'field' }, el('span', { text: 'TURN server' }), turnInput),
+    el('div', { class: 'field-row' },
+      el('label', { class: 'field' }, el('span', { text: 'TURN username' }), userInput),
+      el('label', { class: 'field' }, el('span', { text: 'TURN password' }), passInput)),
+    el('label', { class: 'check-row' }, forceBox, el('span', { text: 'Force calls through TURN (best across strict networks)' })),
+    el('div', { class: 'net-actions' }, status, test, apply),
+    el('small', { class: 'net-hint', text: 'Messages and calls stay end-to-end encrypted — the relay only ever forwards ciphertext.' }));
+}
+
+const DEV_FLAG = 'gm:devMode';
+function devUnlocked() {
+  try { return localStorage.getItem(DEV_FLAG) === '1'; } catch { return false; }
+}
+
+function themePicker() {
+  const modes = [
+    ['light', 'Light'],
+    ['dark', 'Dark'],
+    ['system', 'Match system'],
+  ];
+  const seg = el('div', { class: 'seg' });
+  const paint = () => [...seg.children].forEach((b) => b.classList.toggle('is-on', b.dataset.mode === S.themeMode));
+  for (const [mode, label] of modes) {
+    seg.append(el('button', {
+      type: 'button',
+      class: 'seg-btn',
+      text: label,
+      dataset: { mode },
+      onclick: async () => {
+        applyTheme(mode);
+        try { await S.vault?.setPref('theme', mode); } catch {}
+        paint();
+      },
+    }));
+  }
+  paint();
+  return el('div', { class: 'field' }, el('span', { text: 'Theme' }), seg);
+}
+
+function accountPane() {
+  const nameInput = el('input', { value: S.me.displayName || '', maxlength: '40' });
+  const aboutInput = el('input', { value: S.me.about || '', placeholder: 'a goat of few words', maxlength: '120' });
+  return el('div', {},
+    el('label', { class: 'field' }, el('span', { text: 'Display name' }), nameInput),
+    el('label', { class: 'field' }, el('span', { text: 'About' }), aboutInput),
+    el('div', { class: 'net-actions', style: { justifyContent: 'flex-end', margin: '0 0 14px' } },
+      el('span', { class: 'net-status', text: 'Only you can read your conversations — no one at the relay can.' }),
+      el('button', {
+        class: 'primary small',
+        text: 'Save profile',
+        onclick: async () => {
+          try {
+            const res = await S.api.updateProfile({ displayName: nameInput.value.trim() || S.me.username, about: aboutInput.value.trim() });
+            S.me = { ...S.me, ...res.me };
+            renderMe();
+            renderChatList();
+            toast('Profile saved.');
+          } catch (err) { toast(err.message, 'err'); }
+        },
+      })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Relay' }), el('small', { text: S.api.url || 'not connected' })),
+      el('span', { class: 'chip', text: 'ciphertext only' })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Stay signed in' }), el('small', { text: 'Your token and keys unlock automatically in the OS keychain' })),
+      el('span', { class: 'chip', text: 'on' })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Sign out' }), el('small', { text: 'Also forget the saved login on this device' })),
+      el('button', { class: 'ghost', text: 'Sign out', onclick: signOut })));
+}
+
+function appearancePane() {
+  return el('div', {},
+    themePicker(),
+    el('small', { class: 'net-hint', text: '“Match system” follows macOS or Windows appearance, and switches instantly when your system changes.' }));
+}
+
+function networkPane() {
+  return el('div', {}, netBlock(),
+    el('small', { class: 'net-hint', text: 'Keep both goats pointed at the same relay so messages flow between them.' }));
+}
+
+function privacyPane() {
+  const fingerprint = C.fingerprintKey(S.identity.ikPub).match(/.{1,4}/g).join(' ');
+  return el('div', {},
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'This device’s identity key' }),
+        el('small', { text: 'X25519 · Ed25519' }), el('div', { class: 'kv', text: fingerprint }))),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Per-chat safety numbers' }), el('small', { text: 'Compare them with your friend out loud — it is in each chat’s shield menu' })),
+      el('span', { class: 'chip', text: 'always on' })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Clear local history' }), el('small', { text: 'Removes decrypted messages and ratchets on this device' })),
+      el('button', {
+        class: 'ghost',
+        text: 'Clear',
+        onclick: async () => {
+          const peer = S.activePeer;
+          await S.vault.wipeHistory();
+          S.messages.clear();
+          if (peer) await openChat(peer);
+          else renderChatList();
+          toast('Local history cleared.');
+        },
+      })));
+}
+
+function aboutPane() {
+  let pokes = 0;
+  let pokeTimer = null;
+  const versionBtn = el('button', {
+    class: 'row-item row-btn',
+    type: 'button',
+    title: 'Version',
+    onclick: () => {
+      pokes += 1;
+      clearTimeout(pokeTimer);
+      pokeTimer = setTimeout(() => { pokes = 0; }, 2200);
+      if (pokes >= 5) {
+        pokes = 0;
+        try { localStorage.setItem(DEV_FLAG, '1'); } catch {}
+        toast('Developer mode unlocked 🐐');
+        openSettings('dev');
+      } else if (pokes >= 3) {
+        toast(`${5 - pokes} more taps for developer mode…`);
+      }
+    },
+  },
+  el('div', { class: 'grow' }, el('div', { text: 'GoatMessenger' }), el('small', { text: 'An end-to-end encrypted messenger for goats' })),
+  el('span', { class: 'chip', text: `version ${S.info.version}` }));
+
+  return el('div', {},
+    versionBtn,
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Encryption' }), el('small', { text: 'X3DH + Double Ratchet, X25519 + AES-256-GCM' })),
+      el('span', { class: 'chip', text: 'end-to-end' })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Calls' }), el('small', { text: 'Peer-to-peer DTLS-SRTP media between the two apps' })),
+      el('span', { class: 'chip', text: 'direct' })));
+}
+
+function devPane() {
+  const net = S.info.net || {};
+  const reveal = (label, target) => el('div', { class: 'row-item' },
+    el('div', { class: 'grow' }, el('div', { text: label }), el('small', { text: target || '—' })),
+    el('button', { class: 'ghost', text: 'Reveal', onclick: () => window.goat?.revealPath?.(target) }));
+  return el('div', {},
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Relay in use' }), el('small', { text: S.api.url || '—' })),
+      el('span', { class: 'chip', text: net.embedded ? 'embedded' : 'external' })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Relay address (configured)' }), el('small', { text: net.relayUrl || '(none — local relay)' })),
+      el('span', { class: 'chip', text: 'settings' })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'TURN' }),
+        el('small', { text: net.turn?.urls || 'none — calls go peer-to-peer' })),
+      el('span', { class: 'chip', text: net.turnPort ? `port ${net.turnPort}` : 'no turn' })),
+    reveal('Data directory', S.info.userData),
+    reveal('Boot log', `${S.info.userData}/boot.log`),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Second window' }), el('small', { text: 'Sign in as another goat to test calls and shares' })),
+      el('button', { class: 'ghost', text: 'Open', onclick: () => window.goat?.newWindow?.() })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Test flags' })),
+      el('div', { class: 'dev-chips', style: { display: 'flex', gap: '6px' } },
+        el('span', { class: 'chip tiny', text: S.info.e2e ? 'e2e' : 'no e2e' }),
+        el('span', { class: 'chip tiny', text: S.info.fakeMedia ? 'fake media' : 'real media' }))),
+    el('small', { class: 'net-hint', text: 'Developer tools for poking at relays, TURN and diagnostics. Unlock: About → tap the version 5 times.' }));
+}
+
+function openSettings(category = S.settingsCat || 'account') {
+  const panes = {
+    account: accountPane,
+    appearance: appearancePane,
+    network: networkPane,
+    privacy: privacyPane,
+    about: aboutPane,
+    ...(devUnlocked() ? { dev: devPane } : {}),
+  };
+  if (!panes[category]) category = 'account';
+  S.settingsCat = category;
+
+  const labels = {
+    account: ['Account', 'users'],
+    appearance: ['Appearance', 'smile'],
+    network: ['Network', 'screen'],
+    privacy: ['Security', 'lock'],
+    about: ['About', 'shield'],
+    dev: ['Developer', 'clip'],
+  };
+  const side = el('div', { class: 'settings-side' });
+  for (const id of Object.keys(panes)) {
+    const [label, ic] = labels[id] || [id, 'gear'];
+    side.append(el('button', {
+      class: `settings-cat${id === category ? ' is-on' : ''}`,
+      type: 'button',
+      onclick: () => openSettings(id),
+    }, icon(ic), el('span', { text: label })));
+  }
+
+  const content = el('div', { class: 'settings-body' }, panes[category]());
+  const modal = el('div', { class: 'modal settings-modal' },
+    el('h3', { text: 'Settings' }),
+    el('p', { class: 'sub', text: `@${S.me.username}` }),
+    el('div', { class: 'settings-grid' }, side, content));
+  openModal(modal);
+}
+
+async function signOut() {
+  closeModal();
+  try { await window.goat?.session?.clear?.(); } catch {}
+  try { await S.api.logout(); } catch {}
+  S.api.close();
+  S.calls?.reset();
+  if (S.calls) S.calls.identity = null;
+  S.identity = null;
+  S.me = null;
+  S.activePeer = null;
+  S.contacts.clear();
+  S.messages.clear();
+  S.bundles.clear();
+  S.unread.clear();
+  $('#shell').hidden = true;
+  $('#auth').hidden = false;
+  $('#auth-pass').value = '';
+  setAuthMode('signin');
+  const user = localStorage.getItem('gm:lastUser') || '';
+  $('#auth-username').value = user;
+}
+
+/* ------------------------------------------------------------------ verify */
+
+async function openVerify() {
+  const peer = S.activePeer;
+  if (!peer) return;
+  let bundle;
+  try { bundle = await peerBundle(peer); } catch (err) { return toast(err.message, 'err'); }
+  const number = C.safetyNumber(C.publicBundle(S.identity), bundle);
+  const verifiedAt = S.verified.get(peer);
+  const state = el('div', { class: `verify-state${verifiedAt ? '' : ' unverified'}` },
+    icon(verifiedAt ? 'shield' : 'lock'),
+    el('span', { text: verifiedAt ? `Verified on ${new Date(verifiedAt).toLocaleDateString()}` : 'Not verified yet' }));
+
+  const actions = [];
+  if (verifiedAt) {
+    actions.push(el('button', {
+      class: 'ghost',
+      text: 'Remove verification',
+      onclick: async () => { await S.vault.setVerified(peer, false); S.verified.delete(peer); renderHeader(); closeModal(); },
+    }));
+  } else {
+    actions.push(el('button', {
+      class: 'primary small',
+      text: 'Mark as verified',
+      onclick: async () => {
+        await S.vault.setVerified(peer, true);
+        S.verified.set(peer, Date.now());
+        renderHeader();
+        closeModal();
+        toast('Safety number marked as verified.');
+      },
+    }));
+  }
+  actions.push(el('button', {
+    class: 'ghost',
+    text: 'Copy number',
+    onclick: async () => { await navigator.clipboard.writeText(number); toast('Safety number copied.'); },
+  }));
+
+  const body = el('div', {},
+    state,
+    el('div', { class: 'safety', text: number }),
+    el('p', { class: 'sub', text: 'Read this number to each other out loud, or compare a photo of the screen. If both numbers match, no one is in the middle — every message is sealed with X3DH and a Double Ratchet.' }),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' },
+        el('div', { text: 'Their identity key' }),
+        el('div', { class: 'kv', text: C.fingerprintKey(C.b64d(bundle.ik)).match(/.{1,4}/g).join(' ') }))));
+
+  openModal(modalShell(`Encryption with ${displayName(peer)}`, 'End-to-end · X25519 + AES-256-GCM', body, actions));
+}
+
+/* ==================================================================== calls */
+
+function buildCallManager() {
+  S.calls = new CallManager({
+    identity: S.identity,
+    sound: S.sound,
+    signal: (payload) => {
+      if (!S.api.sendWs(payload)) toast('Connection lost — call ended.', 'err');
+    },
+    bundleFor: async (peer) => {
+      try { return await peerBundle(peer); } catch { return null; }
+    },
+    onState: (state) => renderCall(state),
+    onIncoming: ({ peer, kind }) => {
+      const card = $('#incoming');
+      card.hidden = false;
+      D.paintAvatar($('#incoming-avatar'), { name: displayName(peer), accent: accentOf(peer) });
+      $('#incoming-name').textContent = displayName(peer);
+      $('#incoming-sub').textContent = kind === 'video' ? 'Incoming video call · encrypted' : 'Incoming voice call · encrypted';
+      card.dataset.peer = peer;
+    },
+    onRemoteStream: (stream) => {
+      const audio = $('#remote-audio');
+      if (audio) {
+        audio.srcObject = stream;
+        audio.play().catch(() => {});
+      }
+      watchRemoteVideo(stream);
+    },
+    onLocalStream: (stream) => {
+      const local = $('#local-video');
+      if (local) {
+        local.srcObject = stream;
+        const hasVideo = stream.getVideoTracks().length > 0;
+        $('#call-pip').hidden = !hasVideo;
+        $('#call-pip').classList.toggle('is-share', Boolean(S.calls?.current?.sharing));
+      }
+    },
+    onPeerShare: (on) => {
+      $('#call-share-text').textContent = on
+        ? `${displayName(S.calls?.current?.peer || '')} is sharing their screen`
+        : 'Sharing your screen';
+      if (on) toast(`${displayName(S.calls?.current?.peer || '')} started sharing their screen.`);
+    },
+    onTick: (seconds) => { $('#call-timer').textContent = D.duration(seconds); },
+    onEnd: (result) => endCallUi(result),
+  });
+}
+
+let remoteWatchTimer = null;
+
+function watchRemoteVideo(stream) {
+  stopRemoteWatch();
+  if (!stream) return;
+  const videoTrack = stream.getVideoTracks?.()[0] || null;
+  const video = $('#remote-video');
+  const evaluate = () => {
+    const call = S.calls?.current;
+    if (!call) { stopRemoteWatch(); return; }
+    // Real frames are the only truth: videoWidth > 0 means Chromium has
+    // actually decoded something (camera or screen share).
+    const frames = Boolean(video) && video.videoWidth > 0;
+    const show = Boolean(videoTrack) && (
+      frames
+      || (call.kind === 'video' && videoTrack && !videoTrack.muted)
+      || (call.peerSharing && videoTrack && !videoTrack.muted)
+    );
+    showRemoteVideo(show ? stream : null, show);
+  };
+  // mute/unmute is the fast path (Windows screen shares short-circuit there);
+  // the short poll is the safety net for engines where those events never fire.
+  if (videoTrack) {
+    videoTrack.onunmute = evaluate;
+    videoTrack.onmute = evaluate;
+  }
+  remoteWatchTimer = setInterval(evaluate, 400);
+  evaluate();
+}
+
+function stopRemoteWatch() {
+  if (remoteWatchTimer) {
+    clearInterval(remoteWatchTimer);
+    remoteWatchTimer = null;
+  }
+}
+
+function showRemoteVideo(stream, on) {
+  const video = $('#remote-video');
+  if (!video) return;
+  if (on) {
+    if (video.srcObject !== stream) video.srcObject = stream;
+    video.classList.add('live');
+    $('#call-audio-art').classList.add('hide');
+  } else {
+    video.classList.remove('live');
+    $('#call-audio-art').classList.remove('hide');
+  }
+}
+
+function renderCall(state) {
+  const layer = $('#call-layer');
+  layer.hidden = false;
+  document.body.classList.add('call-active');
+  $('#incoming').hidden = true;
+  D.paintAvatar($('#call-avatar'), { name: displayName(state.peer), accent: accentOf(state.peer) });
+  $('#call-peer').textContent = displayName(state.peer);
+  $('#call-state').textContent = {
+    inviting: 'Calling…',
+    incoming: 'Ringing…',
+    connecting: 'Connecting securely…',
+    connected: 'Connected · end-to-end encrypted',
+  }[state.state] || '';
+  $('#call-timer').textContent = D.duration(state.duration || 0);
+  $('#call-code').textContent = state.code || '';
+  $('#btn-mute').classList.toggle('is-off', state.muted);
+  $('#btn-camera').classList.toggle('is-off', !state.cameraOn && !state.sharing);
+  $('#btn-camera').disabled = state.kind !== 'video' && !state.sharing;
+  $('#btn-share').classList.toggle('is-off', !state.sharing);
+  $('#btn-share').disabled = state.state !== 'connected';
+  $('#call-pip').hidden = !state.cameraOn && !state.sharing;
+  $('#call-pip').classList.toggle('is-share', Boolean(state.sharing));
+  const pill = $('#call-share-pill');
+  pill.hidden = !state.sharing && !state.peerSharing;
+  $('#call-share-text').textContent = state.peerSharing
+    ? `${displayName(state.peer)} is sharing their screen`
+    : 'Sharing your screen';
+  if (state.peerSharing) {
+    // The remote-video watcher flips the stage the moment real frames arrive.
+    const track = S.calls?.current?.remoteStream?.getVideoTracks?.()[0];
+    if (track && track.onunmute) track.onunmute();
+  }
+  if (state.state === 'connecting') S.sound.stopDial();
+}
+
+function endCallUi(result) {
+  stopRemoteWatch();
+  document.body.classList.remove('call-active');
+  $('#call-layer').hidden = true;
+  $('#incoming').hidden = true;
+  $('#remote-video').classList.remove('live');
+  $('#remote-video').srcObject = null;
+  $('#call-audio-art').classList.remove('hide');
+  $('#call-pip').hidden = true;
+  $('#call-share-pill').hidden = true;
+  $('#call-code').hidden = true;
+  S.sound.stopAll();
+  window.goat?.screen?.clear?.(window.goat.partition);
+
+  const peer = result.peer;
+  if (peer && S.contacts.has(peer)) {
+    const rec = {
+      id: null,
+      clientId: D.randomId(8),
+      peer,
+      dir: 'out',
+      from: S.me.username.toLowerCase(),
+      ts: Date.now(),
+      kind: 'call',
+      payload: { outcome: result.outcome, durationSec: result.durationSec, callKind: result.kind },
+      status: 'sent',
+      local: true,
+    };
+    pushRecord(peer, rec);
+    renderChatList();
+    if (S.activePeer === peer) renderConversation({ scroll: 'bottom' });
+  }
+
+  const messages = {
+    completed: `Call ended · ${D.duration(result.durationSec)}`,
+    declined: `${displayName(peer)} declined`,
+    missed: 'Missed call',
+    'no-answer': 'No answer',
+    cancelled: 'Call cancelled',
+    failed: 'Call failed',
+  };
+  toast(messages[result.outcome] || 'Call ended', result.outcome === 'failed' ? 'err' : '');
+}
+
+async function openScreenPicker() {
+  const call = S.calls?.current;
+  if (!call) return toast('Start a call first.', 'err');
+  if (call.state !== 'connected') return toast('Wait until the call connects.', 'err');
+  if (!window.goat?.screen) return toast('Screen sharing needs the desktop app.', 'err');
+  const res = await window.goat.screen.sources();
+  const pick = (source) => async () => {
+    closeModal();
+    toast(`Sharing ${source.name}.`);
+    try {
+      await S.calls.startShare(source.id, window.goat.partition);
+    } catch (err) {
+      toast(err.name === 'NotAllowedError'
+        ? 'Screen recording is blocked. Allow GoatMessenger in System Settings → Privacy.'
+        : err.message || 'Could not share that screen.', 'err');
+    }
+  };
+
+  const cards = (res.sources || []).map((source) => el('button', {
+    class: 'screen-card',
+    type: 'button',
+    onclick: pick(source),
+  },
+  source.thumbnail
+    ? el('img', { src: source.thumbnail, alt: '' })
+    : el('div', { class: 'screen-blank' }, icon('screen')),
+  el('div', { class: 'screen-meta' },
+    source.appIcon ? el('img', { class: 'screen-app', src: source.appIcon, alt: '' }) : null,
+    el('span', { class: 'screen-name', text: source.name }),
+    el('span', { class: 'chip tiny', text: source.kind }))));
+
+  const list = cards.length
+    ? el('div', { class: 'screen-grid' }, ...cards)
+    : el('p', { class: 'sub', text: 'No screens available. On macOS you may need to allow Screen Recording for GoatMessenger, then try again.' });
+
+  const warning = res.permission && res.permission !== 'granted'
+    ? el('div', { class: 'screen-warning' },
+      icon('lock'),
+      el('div', { class: 'grow' },
+        el('div', { text: 'macOS needs Screen Recording permission' }),
+        el('small', { text: 'Allow GoatMessenger in System Settings → Privacy & Security → Screen Recording, then restart the app.' })),
+      el('button', { class: 'ghost', type: 'button', text: 'Open Settings', onclick: () => window.goat.screen.openPrefs() }))
+    : null;
+
+  openModal(modalShell(
+    'Share your screen',
+    'The stream joins the encrypted call — nothing extra leaves your Mac.',
+    el('div', { class: 'screen-picker' }, warning, list),
+    [el('button', { class: 'ghost', type: 'button', text: 'Cancel', onclick: closeModal })],
+  ));
+}
+
+$('#btn-share').addEventListener('click', () => {
+  const call = S.calls?.current;
+  if (call?.sharing) {
+    S.calls.stopShare();
+    return;
+  }
+  openScreenPicker();
+});
+
+$('#btn-call-audio').addEventListener('click', () => startCall('audio'));
+$('#btn-call-video').addEventListener('click', () => startCall('video'));
+
+async function startCall(kind) {
+  if (!S.activePeer) return;
+  if (S.calls.active) return toast('You are already in a call.', 'err');
+  try {
+    await S.calls.start(S.activePeer, kind);
+    if (S.calls.lastError) {
+      toast(S.calls.lastError);
+      S.calls.lastError = null;
+    }
+  } catch (err) {
+    S.calls.reset();
+    $('#call-layer').hidden = true;
+    toast(err.name === 'NotAllowedError'
+      ? 'Microphone access denied. Enable it in System Settings → Privacy.'
+      : err.message || 'Could not start the call.', 'err');
+  }
+}
+
+$('#btn-accept').addEventListener('click', async () => {
+  $('#incoming').hidden = true;
+  try {
+    await S.calls.accept();
+    if (S.calls.lastError) {
+      toast(S.calls.lastError);
+      S.calls.lastError = null;
+    }
+  } catch (err) {
+    toast(err.name === 'NotAllowedError' ? 'Microphone access denied.' : 'Could not answer the call.', 'err');
+    $('#call-layer').hidden = true;
+  }
+});
+
+$('#btn-decline').addEventListener('click', () => {
+  $('#incoming').hidden = true;
+  S.calls.decline();
+});
+
+$('#btn-hangup').addEventListener('click', () => S.calls.hangup());
+$('#btn-mute').addEventListener('click', () => S.calls.toggleMute());
+$('#btn-camera').addEventListener('click', () => S.calls.toggleCamera());
+$('#btn-call-code').addEventListener('click', () => {
+  const node = $('#call-code');
+  node.hidden = !node.hidden;
+});
+
+/* ==================================================================== wiring */
+
+function wireStaticUi() {
+  D.$$('.tab').forEach((tab) => tab.addEventListener('click', () => setAuthMode(tab.dataset.mode)));
+
+  $('#auth-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('#auth-submit');
+    const username = $('#auth-username').value;
+    const pass = $('#auth-pass').value;
+    const buttonLabel = S.authMode === 'signup' ? 'Creating keys…' : 'Unlocking…';
+    $('#auth-error').hidden = true;
+    busy(button, buttonLabel);
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 10)));
+    try {
+      if (S.authMode === 'signup') {
+        const pass2 = $('#auth-pass2').value;
+        if (pass !== pass2) throw new Error('Passphrases do not match.');
+        await signUp(username, pass, $('#auth-display').value);
+        toast('Welcome to the herd.');
+      } else {
+        await signIn(username, pass);
+        toast('Signed in.');
+      }
+    } catch (err) {
+      authError(err.message || 'Something went wrong.');
+    } finally {
+      unbusy(button);
+    }
+  });
+
+  $('#btn-settings').addEventListener('click', openSettings);
+  $('#btn-verify').addEventListener('click', openVerify);
+  $('#search').addEventListener('input', (event) => {
+    S.search = event.target.value;
+    renderChatList();
+  });
+  $('#btn-new-window-auth').addEventListener('click', () => window.goat?.newWindow?.());
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      if (!$('#modal-layer').hidden) return closeModal();
+      if (!$('#call-layer').hidden) return S.calls?.hangup();
+      if (!$('#emoji-pop').hidden) return void ($('#emoji-pop').hidden = true);
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      $('#search').focus();
+    }
+  });
+
+  document.addEventListener('pointerdown', () => S.sound.ensure(), { once: true });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && S.activePeer) {
+      S.unread.set(S.activePeer, 0);
+      syncBadge();
+      renderChatList();
+      const lastSeq = (S.messages.get(S.activePeer) || []).reduce((m, r) => Math.max(m, r.seq || 0), 0);
+      sendRead(S.activePeer, lastSeq);
+    }
+  });
+
+  window.addEventListener('beforeunload', () => {
+    try { S.calls?.reset(); } catch {}
+    try { S.api?.close(); } catch {}
+  });
+}
+
+/* ===================================================================== boot */
+
+// Brings back the previous session without the passphrase. Runs after the relay
+// is known to be healthy; when it fails we simply fall through to sign-in and
+// keep the stored record (it may belong to a relay that is only down right now).
+async function tryRestoreSession() {
+  if (S.info.e2e) return; // tests sign in explicitly
+  let saved;
+  try { saved = await window.goat?.session?.load?.(); } catch { return; }
+  if (!saved?.token || !saved.identity) return;
+  try {
+    S.api.setToken(saved.token);
+    const bootstrap = await S.api.request('/api/bootstrap');
+    await startSession({
+      username: saved.username,
+      token: saved.token,
+      identity: C.importIdentity(saved.identity),
+      bootstrap,
+    });
+    showBootNote('Welcome back.');
+  } catch {
+    try { S.api.setToken(null); } catch {}
+  }
+}
+
+function showRelayWarning(message) {
+  const card = $('.auth-card');
+  if (!card) return;
+  let node = $('#relay-warning');
+  if (!node) {
+    node = el('div', { class: 'auth-error', id: 'relay-warning' });
+    card.insertBefore(node, $('.auth-meta'));
+  }
+  node.innerHTML = '';
+  node.append(
+    el('strong', { text: 'Relay offline. ' }),
+    el('span', { text: message }),
+    el('button', {
+      class: 'link',
+      type: 'button',
+      text: ' Retry',
+      onclick: async () => {
+        const res = await window.goat.retryRelay();
+        if (res.relayError) {
+          showRelayWarning(res.relayError);
+          return;
+        }
+        S.api = new Api(res.relayUrl);
+        S.info.relayUrl = res.relayUrl;
+        $('#relay-label').textContent = `relay ${res.relayUrl}`;
+        node.hidden = true;
+      },
+    }),
+  );
+  node.hidden = false;
+}
+
+async function boot() {
+  wireStaticUi();
+  try {
+    S.info = await window.goat.info();
+  } catch {
+    S.info = { relayUrl: 'http://127.0.0.1:4040' };
+  }
+  S.api = new Api(S.info.relayUrl);
+  buildCallManager();
+  if (S.info.net) S.calls.setNetwork({ turn: S.info.net.turn, forceRelay: S.info.net.forceRelay });
+
+  $('#relay-label').textContent = `relay ${S.info.relayUrl}`;
+  applyTheme(savedTheme());
+  const lastUser = localStorage.getItem('gm:lastUser');
+  if (lastUser) $('#auth-username').value = lastUser;
+
+  const healthy = await fetch(`${S.info.relayUrl}/api/health`).then((r) => r.ok).catch(() => false);
+  showBootNote(healthy ? 'Ready.' : 'Relay not reachable — start it with npm run server.');
+  if (!healthy) showRelayWarning(S.info.relayError || `No relay answering at ${S.info.relayUrl}.`);
+
+  await tryRestoreSession();
+
+  setTimeout(() => {
+    $('#boot').classList.add('hide');
+    if (!S.me) {
+      $('#auth').hidden = false;
+      $('#auth-username').focus();
+    }
+    S.booted = true;
+  }, healthy ? 500 : 900);
+}
+
+/* ============================================================== test hooks */
+
+window.__gm = {
+  state: S,
+  booted: () => S.booted,
+  signIn,
+  signUp,
+  openChat,
+  signOut,
+  async sendText(text) {
+    await sendPayload(S.activePeer, 'text', { text });
+  },
+  async sendFile(name, mime, bytes) {
+    const file = new File([bytes], name, { type: mime });
+    await sendFile(file);
+  },
+  addContact: async (name) => {
+    applyBootstrap(await S.api.addContact(name));
+  },
+  acceptRequest,
+  ready: () => Boolean(S.me && S.booted),
+  unread: (peer) => S.unread.get(String(peer).toLowerCase()) || 0,
+  startCall,
+  acceptCall: () => S.calls.accept(),
+  declineCall: () => S.calls.decline(),
+  hangup: () => S.calls.hangup(),
+  callState: () => {
+    const call = S.calls?.current;
+    if (!call) return { state: 'idle' };
+    return {
+      state: call.state,
+      kind: call.kind,
+      code: call.code,
+      pc: call.pc ? call.pc.connectionState : null,
+      localTracks: call.localStream ? call.localStream.getTracks().map((t) => `${t.kind}:${t.enabled}`) : [],
+      remoteTracks: call.remoteStream ? call.remoteStream.getTracks().map((t) => t.kind) : [],
+      sharing: Boolean(call.sharing),
+      peerSharing: Boolean(call.peerSharing),
+      sendingVideo: Boolean(call.videoTx?.sender?.track),
+      usingTurn: S.calls.hasTurn(),
+      icePolicy: S.calls.icePolicy,
+      remoteVideo: (() => {
+        const stream = call.remoteStream;
+        if (!stream) return null;
+        const track = stream.getVideoTracks()[0];
+        if (!track) return null;
+        const settings = track.getSettings?.() || {};
+        return { muted: track.muted, width: settings.width || 0, height: settings.height || 0 };
+      })(),
+    };
+  },
+  startShare: (id) => S.calls.startShare(id, window.goat.partition),
+  stopShare: () => S.calls.stopShare(),
+  screenSources: () => window.goat.screen.sources(),
+  openScreenPicker,
+  net: () => S.info.net,
+  relayUrl: () => S.api.url,
+  setNetwork: (next) => {
+    S.calls.setNetwork(next);
+    S.info.net = { ...(S.info.net || {}), ...next };
+    return S.calls.iceServers;
+  },
+  // Transport-level facts for the live call: DTLS state, the SRTP cipher, the
+  // certificate pair, and which candidate pair actually carries the media.
+  callStats: async () => {
+    const call = S.calls?.current;
+    if (!call || !call.pc) return { error: 'no active call' };
+    try {
+      const report = await call.pc.getStats();
+      const rows = [];
+      report.forEach((stat) => {
+        const row = { id: stat.id, type: stat.type };
+        ['dtlsState', 'dtlsCipher', 'srtpCipher', 'selectedCandidatePairId', 'bytesSent', 'bytesReceived',
+          'state', 'selected', 'nominated', 'localCandidateId', 'remoteCandidateId', 'fingerprint',
+          'fingerprintAlgorithm', 'port', 'protocol', 'address', 'candidateType', 'transportId'].forEach((key) => {
+          if (stat[key] !== undefined) row[key] = stat[key];
+        });
+        rows.push(row);
+      });
+      const certificates = rows.filter((r) => r.type === 'certificate').map((r) => r.fingerprint || r.id);
+      const transport = rows.find((r) => r.type === 'transport') || null;
+      const candidates = {};
+      for (const row of rows) {
+        if (row.type === 'local-candidate' || row.type === 'remote-candidate') {
+          candidates[row.id] = { port: row.port, protocol: row.protocol, address: row.address, type: row.candidateType };
+        }
+      }
+      const pairs = rows.filter((r) => r.type === 'candidate-pair');
+      const pair = pairs.find((p) => p.selected)
+        || (transport?.selectedCandidatePairId ? pairs.find((p) => p.id === transport.selectedCandidatePairId) : null)
+        || pairs.find((p) => p.state === 'succeeded' && p.nominated)
+        || pairs.find((p) => p.state === 'succeeded')
+        || null;
+      let relayPort = null;
+      try { relayPort = Number(new URL(S.api.url).port || 80); } catch {}
+      return {
+        transport: transport ? { dtlsState: transport.dtlsState || null, dtlsCipher: transport.dtlsCipher || null, srtpCipher: transport.srtpCipher || null } : null,
+        certificates,
+        pair: pair ? {
+          state: pair.state || null,
+          bytesSent: pair.bytesSent || 0,
+          bytesReceived: pair.bytesReceived || 0,
+          localCandidate: candidates[pair.localCandidateId] || null,
+          remoteCandidate: candidates[pair.remoteCandidateId] || null,
+        } : null,
+        relayPort,
+        types: [...new Set(rows.map((r) => r.type))].sort(),
+      };
+    } catch (err) {
+      return { error: err.message };
+    }
+  },
+  transcript: (peer) => (S.messages.get(String(peer).toLowerCase()) || []).map((r) => ({
+    dir: r.dir, kind: r.kind, text: r.payload?.text, status: r.status, ts: r.ts,
+  })),
+  safety: async (peer) => C.safetyNumber(C.publicBundle(S.identity), await peerBundle(peer)),
+  contacts: () => [...S.contacts.values()].map((c) => ({ username: c.username, state: c.state })),
+  activePeer: () => S.activePeer,
+};
+
+boot();
