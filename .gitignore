@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-installer/
+build/dmg-stage/
+build/*.dmg
+data/
+mnt/
+*.log
+npm-debug.log*
+.DS_Store

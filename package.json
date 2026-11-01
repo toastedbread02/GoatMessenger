@@ -1,0 +1,64 @@
+{
+  "name": "goatmessenger",
+  "productName": "GoatMessenger",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GoatMessenger — an end-to-end encrypted desktop messenger for goats.",
+  "main": "app/main.js",
+  "type": "commonjs",
+  "author": "goatmessenger",
+  "build": {
+    "appId": "app.goatmessenger.desktop",
+    "productName": "GoatMessenger",
+    "asar": true,
+    "directories": {
+      "output": "dist-installer"
+    },
+    "files": [
+      "app/**/*",
+      "server/**/*"
+    ],
+    "win": {
+      "icon": "build/goatmessenger.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "GoatMessenger-Portable.exe"
+    }
+  },
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/index.js",
+    "dev": "node scripts/dev.js",
+    "test:crypto": "node scripts/test-crypto.js",
+    "test:server": "node scripts/test-server.js",
+    "test:e2ee": "node scripts/test-e2ee.js",
+    "test:turn": "electron scripts/test-turn.js",
+    "test": "npm run test:crypto && npm run test:server && npm run test:e2ee && npm run test:turn",
+    "e2e": "node scripts/e2e.js",
+    "package": "node scripts/package.js",
+    "package:win": "node scripts/package-win.js",
+    "package:win-portable": "npm run icon && electron-builder --win portable --x64",
+    "icon": "electron scripts/make-icon.js"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.1",
+    "@noble/hashes": "^1.8.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electron/osx-sign": "^2.7.2",
+    "electron": "^33.4.11",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.25.0",
+    "png-to-ico": "^3.0.2",
+    "resedit": "^3.1.0"
+  }
+}

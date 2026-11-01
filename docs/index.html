@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoatMessenger — end-to-end encrypted messaging for goats</title>
+  <meta name="description" content="GoatMessenger is an end-to-end encrypted desktop messenger for macOS and Windows: Double Ratchet messaging, encrypted attachments, E2EE voice & video calls, and a relay you own.">
+  <meta name="theme-color" content="#f7efe1">
+  <link rel="icon" type="image/png" href="goat-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="#top"><img src="goat-icon.png" alt="" width="34" height="34"><span>GoatMessenger</span></a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#encryption">Encryption</a>
+      <a href="#relay">Host a relay</a>
+      <a href="https://github.com/toastedbread02/GoatMessenger">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="kicker">encrypted · peer-to-peer · open</p>
+        <h1>Messaging no one<br>can read. Not even us.</h1>
+        <p class="lede">
+          GoatMessenger is an end-to-end encrypted desktop messenger — the X3DH handshake,
+          a full Double Ratchet, encrypted attachments and peer-to-peer encrypted calls,
+          wrapped in a warm camel-and-espresso interface. macOS · Windows.
+        </p>
+        <div class="dl-row" id="dl-row">
+          <a class="dl-btn primary" id="dl-auto" href="downloads">
+            <svg viewBox="0 0 24 24" class="dl-ico"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span><b id="dl-label">Download</b><small id="dl-hint">detecting your system…</small></span>
+          </a>
+          <a class="dl-btn" href="https://github.com/toastedbread02/GoatMessenger/releases/latest/download/GoatMessenger-Portable.exe">
+            <svg viewBox="0 0 24 24" class="dl-ico dl-fill"><path d="M3.2 5.6l7.7-1.05V11H3.2zM12.1 4.4l8.7-1.2v7.8h-8.7zM3.2 13h7.7v6.45L3.2 18.4zM12.1 13h8.7v7.8l-8.7-1.2zM12.1 13h8.7v7.8l-8.7-1.2z"/></svg>
+            <span><b>Windows</b><small>portable .exe, 77 MB — nothing to install</small></span>
+          </a>
+          <a class="dl-btn" href="https://github.com/toastedbread02/GoatMessenger/releases/latest/download/GoatMessenger.dmg">
+            <svg viewBox="0 0 24 24" class="dl-ico dl-fill"><path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.53 4.08zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/></svg>
+            <span><b>macOS</b><small>.dmg — drag the goat into Applications</small></span>
+          </a>
+        </div>
+        <p class="dl-note">Unsigned, free download. Windows SmartScreen asks for “More info → Run anyway” the first time.</p>
+      </div>
+      <div class="hero-art">
+        <div class="window-mock">
+          <div class="win-bar"><i></i><i></i><i></i><span>GoatMessenger</span></div>
+          <img src="screenshots/03-conversation.png" alt="A GoatMessenger conversation">
+        </div>
+      </div>
+    </section>
+
+    <section class="strip" aria-hidden="true"><span> GoatMessenger · 🐐 · end-to-end encrypted · 🐐 · Double Ratchet · 🐐 · encrypted calls · 🐐 · your own relay · 🐐 · open builds · 🐐 · GoatMessenger · 🐐 · end-to-end encrypted · 🐐 · Double Ratchet · 🐐 · encrypted calls · 🐐 · your own relay</span></section>
+
+    <section id="features" class="features">
+      <h2>Everything a messenger should carry — sealed</h2>
+      <div class="cards">
+        <article class="card">
+          <h3>🔐 Double Ratchet messaging</h3>
+          <p>X3DH key agreement with signed & one-time prekeys, then a full Double Ratchet:
+             per-message keys, forward secrecy and break-in recovery on every turn. Out-of-order
+             delivery and replays are handled, not hoped away.</p>
+        </article>
+        <article class="card">
+          <h3>🖼 Encrypted attachments</h3>
+          <p>Images, files and recorded voice notes are sealed on your machine with a one-off
+             AES-256-GCM key. The key travels <em>inside</em> the encrypted message — the relay
+             stores nothing but ciphertext.</p>
+        </article>
+        <article class="card">
+          <h3>📞 Encrypted calls & screen share</h3>
+          <p>Real peer-to-peer WebRTC. Call signalling is sealed under a call key derived from
+             signed ephemeral keys, media is DTLS-SRTP, and both sides confirm the same
+             six-digit call security code.</p>
+        </article>
+        <article class="card">
+          <h3>🛰 A relay you own</h3>
+          <p>The server is a tiny Node process you run yourself — locally, on a VPS, or through
+             a tunnel. It forwards ciphertext and verifies sign-ins; it cannot read a thing.</p>
+        </article>
+        <article class="card">
+          <h3>🔢 Safety numbers</h3>
+          <p>A 60-digit fingerprint per conversation you can read aloud and mark verified —
+             no blind trust in a green tick.</p>
+        </article>
+        <article class="card">
+          <h3>🪄 Small comforts</h3>
+          <p>Presence, typing indicators, read receipts, unread badges, day dividers, search,
+             voice notes, clipboard paste & drag-and-drop files, dark mode, and history that
+             stays on your disk.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="shots">
+      <h2>A look inside</h2>
+      <div class="shot-grid">
+        <figure><img src="screenshots/01-sign-in.png" alt="The sign-in screen"><figcaption>Sign in — keys live on your machine</figcaption></figure>
+        <figure><img src="screenshots/05-video-call.png" alt="An encrypted video call"><figcaption>Encrypted video calls, P2P</figcaption></figure>
+        <figure><img src="screenshots/05c-screen-share.png" alt="Screen sharing"><figcaption>Screen sharing in calls</figcaption></figure>
+        <figure><img src="screenshots/06-audio-call.png" alt="An encrypted audio call"><figcaption>Voice-only calls with a safety code</figcaption></figure>
+      </div>
+    </section>
+
+    <section id="encryption" class="enc">
+      <h2>What the math actually is</h2>
+      <div class="enc-grid">
+        <div><b>Identity</b><span>X25519 for key agreement, Ed25519 for signatures that authenticate prekeys and call handshakes.</span></div>
+        <div><b>Key agreement</b><span>X3DH with a signed prekey and one-time prekeys, freshly consumed per conversation.</span></div>
+        <div><b>Transport</b><span>Double Ratchet — symmetric chains per direction plus a DH turn on every ratchet step.</span></div>
+        <div><b>Message AEAD</b><span>AES-256-GCM with a key derived for each message; the header is authenticated as AAD.</span></div>
+        <div><b>Passphrase</b><span>scrypt splits it into a login token and a separate key-wrapping key — the relay can verify you, but never unwrap you.</span></div>
+        <div><b>What the server sees</b><span>Only names, who talks to whom, sizes and timestamps. Never bodies, files, voice notes or call signalling.</span></div>
+      </div>
+    </section>
+
+    <section id="relay" class="relay">
+      <h2>Or host the relay yourself</h2>
+      <p class="relay-lede">Run it on your own machine or a tiny VPS, share the address, done:</p>
+      <pre><code>npm install
+npm run server          <i># relay on 127.0.0.1:4040</i>
+
+# share it across the internet through a tunnel:
+npx ngrok http 4040     <i># paste the https URL into Settings → Network</i></code></pre>
+      <p class="relay-note">The apps ship with an embedded relay for solo use; anyone you send the app to can
+      hang their own relay off yours, or spin up a friendlier one on any Node host.</p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <img src="goat-icon.png" width="30" height="30" alt="">
+    <p>GoatMessenger — built out loud: every line, from the Double Ratchet to the icon renderer,
+       lives in <a href="https://github.com/toastedbread02/GoatMessenger">the open repo</a>.</p>
+  </footer>
+
+  <script>
+    // Point the primary button at the right download for the visitor's system.
+    (function () {
+      const mac = /Mac|iPhone|iPad/.test(navigator.platform) || navigator.userAgent.includes('Mac OS');
+      const btn = document.getElementById('dl-auto');
+      const label = document.getElementById('dl-label');
+      const hint = document.getElementById('dl-hint');
+      const url = (mac ? 'GoatMessenger.dmg' : 'GoatMessenger-Portable.exe');
+      const base = 'https://github.com/toastedbread02/GoatMessenger/releases/latest/download/';
+      btn.href = base + url;
+      label.textContent = mac ? 'Download for macOS' : 'Download for Windows';
+      hint.textContent = mac ? 'GoatMessenger.dmg — drag into Applications'
+                             : 'GoatMessenger-Portable.exe — nothing to install';
+      const rows = document.querySelectorAll('#dl-row .dl-btn:not(.primary)');
+      rows.forEach((r) => { if (r.href.endsWith(url)) r.classList.add('mine'); });
+    })();
+  </script>
+</body>
+</html>
