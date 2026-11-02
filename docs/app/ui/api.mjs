@@ -59,6 +59,9 @@ export class Api {
   signup(payload) { return this.request('/api/signup', { method: 'POST', body: payload, timeout: 40000 }); }
   login(payload) { return this.request('/api/login', { method: 'POST', body: payload, timeout: 40000 }); }
   logout() { return this.request('/api/logout', { method: 'POST', body: {} }); }
+  deleteAccount(username) {
+    return this.request('/api/account', { method: 'DELETE', body: { confirm: username }, timeout: 30000 });
+  }
   bootstrap() { return this.request('/api/bootstrap'); }
   lookup(username) { return this.request(`/api/lookup?username=${encodeURIComponent(username)}`); }
   addContact(username) { return this.request('/api/contacts', { method: 'POST', body: { username } }); }

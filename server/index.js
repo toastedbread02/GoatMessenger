@@ -305,6 +305,37 @@ function createGoatServer({
         return json(res, 200, { ok: true });
       }
 
+      // Account deletion — data minimization in one step. The user must
+      // re-type their goat name in the body so fat-finger clicks don't nuke
+      // an account. Everything the relay holds for this user is erased.
+      if (route === '/api/account' && req.method === 'DELETE') {
+        const body = await readJson(req);
+        const confirm = String(body.confirm || '').trim().toLowerCase();
+        if (confirm !== me.username.toLowerCase()) {
+          return fail(res, 400, 'Type your goat name to confirm deletion.');
+        }
+        for (const rel of store.contactsOf(me.username)) {
+          if (rel.state === 'accepted') {
+            sendTo(rel.peer, { t: 'contact-removed', user: me.username.toLowerCase() });
+          }
+        }
+        const wsSet = sockets.get(me.username.toLowerCase());
+        if (wsSet) {
+          for (const ws of wsSet) { try { ws.close(4002, 'account-deleted'); } catch {} }
+          sockets.delete(me.username.toLowerCase());
+        }
+        const filePaths = store.dropFilesOf(me.username);
+        store.dropRelationsOf(me.username);
+        store.dropMessagesFor(me.username);
+        store.dropSessionsOf(me.username);
+        store.dropUser(me.username);
+        store.flush();
+        for (const filePath of filePaths) {
+          try { fs.unlinkSync(filePath); } catch {}
+        }
+        return json(res, 200, { ok: true });
+      }
+
       if (route === '/api/profile' && req.method === 'POST') {
         const body = await readJson(req);
         const profile = sanitizeProfile(body);

@@ -166,6 +166,59 @@ class Store {
   getFile(id) {
     return this.data.files[id] || null;
   }
+
+  /* account deletion -------------------------------------------------------- */
+
+  dropUser(name) {
+    delete this.data.users[String(name || '').toLowerCase()];
+    this.touch();
+  }
+
+  dropSessionsOf(username) {
+    const name = String(username || '').toLowerCase();
+    for (const [token, session] of Object.entries(this.data.sessions)) {
+      if (session.user === name) delete this.data.sessions[token];
+    }
+    this.touch();
+  }
+
+  /** Removes every contact row involving this user; returns affected peers. */
+  dropRelationsOf(username) {
+    const name = String(username || '').toLowerCase();
+    const peers = new Set();
+    for (const [user, list] of Object.entries(this.data.contacts)) {
+      if (user !== name && list[name]) {
+        delete list[name];
+        peers.add(user);
+      }
+    }
+    delete this.data.contacts[name];
+    this.touch();
+    return peers;
+  }
+
+  /** Drops all message rooms that include this user; ciphertext only. */
+  dropMessagesFor(username) {
+    const name = String(username || '').toLowerCase();
+    for (const room of Object.keys(this.data.messages)) {
+      if (room.split('~').includes(name)) delete this.data.messages[room];
+    }
+    this.touch();
+  }
+
+  /** Removes a user's file records; returns on-disk paths for the caller. */
+  dropFilesOf(username) {
+    const name = String(username || '').toLowerCase();
+    const paths = [];
+    for (const [id, rec] of Object.entries(this.data.files)) {
+      if (rec.owner === name) {
+        paths.push(rec.path);
+        delete this.data.files[id];
+      }
+    }
+    this.touch();
+    return paths;
+  }
 }
 
 module.exports = { Store };

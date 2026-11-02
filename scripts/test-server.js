@@ -264,6 +264,44 @@ const WebSocket = require('ws');
     bobWs.close();
   });
 
+  await check('account deletion erases everything the relay held', async () => {
+    const dave = await client('dave', 'Dave the Goat');
+    const daveWs = await connect(dave.token);
+    const aliceWs = await connect(alice.token);
+    // become contacts + exchange a message + an upload
+    const sent = await dave.api('/api/contacts', { method: 'POST', body: { username: 'alice' } });
+    assert.strictEqual(sent.status, 200);
+    await alice.api('/api/contacts/accept', { method: 'POST', body: { username: 'dave' } });
+    const env = { ct: 'opaque-ciphertext-blob', header: { h1: 'x' } };
+    const msg = await dave.api('/api/messages', { method: 'POST', body: { to: 'alice', env, clientId: 'del-1' } });
+    assert.strictEqual(msg.status, 200);
+    const up = await dave.api('/api/upload', { method: 'POST', raw: new Uint8Array([9, 9, 9]), headers: { 'x-file-name': 'hay.bin', 'x-file-type': 'application/octet-stream' } });
+    assert.strictEqual(up.status, 200);
+
+    // wrong confirmation must not delete anything
+    const nope = await api('/api/account', { method: 'DELETE', body: { confirm: 'someone-else' }, token: dave.token });
+    assert.strictEqual(nope.status, 400);
+
+    // the real thing, confirmed
+    const gone = await api('/api/account', { method: 'DELETE', body: { confirm: 'dave' }, token: dave.token });
+    assert.strictEqual(gone.status, 200);
+    // the relay told alice, and dave's socket was closed
+    await aliceWs.wait((m) => m.t === 'contact-removed' && m.user === 'dave');
+    // account is unreachable
+    const login = await api('/api/login', { method: 'POST', body: { username: 'dave', authToken: dave.keys.authToken } });
+    assert.strictEqual(login.status, 401, 'deleted account cannot log in');
+    const lookup = await api('/api/lookup?username=dave', { token: alice.token });
+    assert.strictEqual(lookup.status, 404, 'deleted account cannot be looked up');
+    // the queued messages and the stored file vanished with the account
+    // (the conversation itself 404s now — there is no goat on the other end)
+    const history = await alice.api('/api/messages?username=dave');
+    assert.strictEqual(history.status, 404, 'conversation is unreachable after deletion');
+    const blob = await alice.api(`/api/file/${up.id}`);
+    assert.ok(blob.status === 404 || blob.status === 410, 'uploaded file record is gone');
+    daveWs.close();
+    aliceWs.close();
+  });
+
   await check('persistence survives a restart', async () => {
     await goat.close();
     const again = createGoatServer({ port: 0, dataDir, host: '127.0.0.1' });

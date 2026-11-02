@@ -1,5 +1,6 @@
 // GoatMessenger renderer: session handling, encrypted messaging, contacts, calls.
 import * as C from '../shared/crypto.mjs';
+import { isVerified, VERIFIED_TIP } from '../shared/verified.mjs';
 import { Api, ApiError } from './api.mjs';
 import { Vault } from './vault.mjs';
 import { CallManager } from './calls.mjs';
@@ -164,6 +165,7 @@ function setAuthMode(mode) {
   D.$$('.tab').forEach((tab) => tab.classList.toggle('is-on', tab.dataset.mode === mode));
   $('#field-display').hidden = !isSignup;
   $('#field-pass2').hidden = !isSignup;
+  $('#field-consent').hidden = !isSignup;
   $('#auth-submit').textContent = isSignup ? 'Create my herd' : 'Sign in';
   $('#auth-hint').textContent = isSignup
     ? 'Your passphrase derives your private keys on this device. The relay only ever sees ciphertext.'
@@ -849,13 +851,30 @@ async function declineRequest(peer) {
   }
 }
 
+// Blue checkmark for code-verified handles (see shared/verified.mjs).
+function verifiedBadge(username) {
+  if (!isVerified(username)) return null;
+  return el('span', {
+    class: 'badge-verified',
+    role: 'img',
+    tabindex: '0',
+    'aria-label': VERIFIED_TIP,
+    'data-tip': VERIFIED_TIP,
+    html: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"></circle><path d="M6.8 12.6l3.3 3.3 7-8.2"></path></svg>',
+  });
+}
+
 function renderHeader() {
   const peer = S.activePeer;
   if (!peer) return;
   const rec = S.contacts.get(peer);
   const avatar = $('#peer-avatar');
   D.paintAvatar(avatar, { name: rec?.displayName || peer, accent: rec?.accent, online: isOnline(peer), showPresence: true, avatar: rec?.avatar });
-  $('#peer-name').textContent = rec?.displayName || peer;
+  const nameEl = $('#peer-name');
+  nameEl.innerHTML = '';
+  nameEl.append(rec?.displayName || peer);
+  const badge = verifiedBadge(peer);
+  if (badge) nameEl.append(badge);
 
   const sub = $('#peer-sub');
   sub.innerHTML = '';
@@ -1508,7 +1527,11 @@ function openAddContact() {
       const row = el('div', { class: 'picker-row' });
       const avatar = el('div', { class: 'avatar' });
       D.paintAvatar(avatar, { name: found.user.displayName, accent: found.user.accent, avatar: found.user.avatar });
-      row.append(avatar, el('div', { class: 'chat-name', text: found.user.displayName }),
+      const foundName = el('div', { class: 'chat-name' });
+      foundName.append(found.user.displayName);
+      const foundBadge = verifiedBadge(found.user.username);
+      if (foundBadge) foundName.append(foundBadge);
+      row.append(avatar, foundName,
         el('span', { class: 'chip', text: found.state === 'accepted' ? 'connected' : found.state === 'in' ? 'wants you' : found.user.presence }));
       row.addEventListener('click', async () => {
         try {
@@ -1561,9 +1584,14 @@ function profileCard(user) {
   return el('div', { class: 'profile-card' },
     banner,
     el('div', { class: 'pc-main' },
-      avatar,
-      el('div', { class: 'pc-id' },
-        el('div', { class: 'pc-name', text: user.displayName || user.username }),
+      avatar,        el('div', { class: 'pc-id' },
+        (() => {
+          const nameRow = el('div', { class: 'pc-name' });
+          nameRow.append(user.displayName || user.username);
+          const badge = verifiedBadge(user.username);
+          if (badge) nameRow.append(badge);
+          return nameRow;
+        })(),
         el('div', { class: 'pc-handle', text: `@${user.username || ''}` })),
       user.about ? el('p', { class: 'pc-about', text: user.about }) : null,
       el('div', { class: 'pc-chips' },
@@ -1832,7 +1860,10 @@ function profilePane() {
       el('span', { class: 'chip', text: 'on' })),
     el('div', { class: 'row-item' },
       el('div', { class: 'grow' }, el('div', { text: 'Sign out' }), el('small', { text: 'Also forget the saved login on this device' })),
-      el('button', { class: 'ghost', text: 'Sign out', onclick: signOut })));
+      el('button', { class: 'ghost', text: 'Sign out', onclick: signOut })),
+    el('div', { class: 'row-item danger-item' },
+      el('div', { class: 'grow' }, el('div', { text: 'Delete account & data' }), el('small', { text: 'Erases this account on the relay, its stored ciphertext and your local history — for good' })),
+      el('button', { class: 'ghost danger-btn', text: 'Delete…', onclick: openDeleteAccount })));
 }
 
 function appearancePane() {
@@ -1992,6 +2023,74 @@ async function signOut() {
   setAuthMode('signin');
   const user = localStorage.getItem('gm:lastUser') || '';
   $('#auth-username').value = user;
+}
+
+// Settings → Profile → Delete: wipes the relay account AND local data, then
+// returns to the sign-in screen. Deliberate two-step confirm (type the name).
+function openDeleteAccount() {
+  if (S.isGuest) { toast('A guest session only lives on this device — signing out erases it.', 'err'); return; }
+  const name = S.me.username;
+  const confirmInput = el('input', {
+    spellcheck: 'false', autocapitalize: 'none', autocomplete: 'off',
+    'aria-label': 'Type your goat name to confirm deletion',
+  });
+  const err = el('p', { class: 'auth-error', hidden: true });
+  const delBtn = el('button', {
+    class: 'primary small danger-btn', type: 'button', text: 'Delete my account forever', disabled: true,
+    onclick: async () => {
+      delBtn.disabled = true;
+      busy(delBtn, 'Deleting…');
+      err.hidden = true;
+      try {
+        await S.api.deleteAccount(name);
+        try { await window.goat?.session?.clear?.(); } catch {}
+        try { await S.vault?.wipeAll?.(); } catch {}
+        try { localStorage.removeItem('gm:lastUser'); } catch {}
+        S.api.close();
+        S.calls?.reset();
+        if (S.calls) S.calls.identity = null;
+        S.identity = null;
+        S.me = null;
+        S.activePeer = null;
+        S.contacts.clear();
+        S.messages.clear();
+        S.bundles.clear();
+        S.unread.clear();
+        S.presence.clear();
+        S.verified.clear();
+        closeModal();
+        $('#shell').hidden = true;
+        $('#auth').hidden = false;
+        $('#auth-pass').value = '';
+        $('#auth-username').value = '';
+        setAuthMode('signin');
+        toast('Your account and everything on the relay for it is gone.');
+      } catch (deleteErr) {
+        err.textContent = deleteErr.message || 'The relay could not delete the account. It may be offline — try again when it is back.';
+        err.hidden = false;
+        unbusy(delBtn);
+        delBtn.disabled = confirmInput.value.trim().toLowerCase() !== name.toLowerCase();
+      }
+    },
+  });
+  confirmInput.addEventListener('input', () => {
+    delBtn.disabled = confirmInput.value.trim().toLowerCase() !== name.toLowerCase();
+  });
+  const body = el('div', {},
+    el('p', { class: 'sub', text: 'This permanently erases:' }),
+    el('ul', { class: 'delete-list' },
+      el('li', { text: 'your account, profile, photos and key backup on the relay' }),
+      el('li', { text: 'the queued ciphertext the relay holds for your conversations' }),
+      el('li', { text: 'uploaded attachments stored on the relay' }),
+      el('li', { text: 'decrypted history, keys and preferences on this device' })),
+    el('p', { class: 'sub', text: 'Your friends keep their chats; your messages simply disappear for them. There is no undo.' }),
+    el('label', { class: 'field' }, el('span', { text: `Type “${name}” to confirm` }), confirmInput),
+    err);
+  openModal(modalShell('Delete this goat?', null, body, [
+    el('button', { class: 'ghost', type: 'button', text: 'Cancel', onclick: closeModal }),
+    delBtn,
+  ]));
+  setTimeout(() => confirmInput.focus(), 60);
 }
 
 /* ------------------------------------------------------------------ verify */
@@ -2361,6 +2460,9 @@ function wireStaticUi() {
       if (S.authMode === 'signup') {
         const pass2 = $('#auth-pass2').value;
         if (pass !== pass2) throw new Error('Passphrases do not match.');
+        if (!$('#auth-age').checked || !$('#auth-terms').checked) {
+          throw new Error('Please confirm your age and accept the Terms & Privacy policy to continue.');
+        }
         await signUp(username, pass, $('#auth-display').value);
         toast('Welcome to the herd.');
       } else {

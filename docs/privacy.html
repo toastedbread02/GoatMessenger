@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy policy — GoatMessenger</title>
+  <meta name="description" content="What GoatMessenger collects, what it never touches, and how to erase everything — in plain goat language.">
+  <meta name="theme-color" content="#f7efe1">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="icon" type="image/png" href="goat-icon.png">
+  <link rel="apple-touch-icon" href="billy-round.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#page">Skip to content</a>
+  <header class="nav">
+    <a class="brand" href="index.html"><img src="goat-icon.png" alt="" width="34" height="34"><span>GoatMessenger</span></a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="index.html">Home</a>
+      <a href="cookies.html">Cookies</a>
+      <a href="terms.html">Terms</a>
+      <a href="https://github.com/toastedbread02/GoatMessenger">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="page">
+    <section class="legal">
+      <p class="kicker">privacy</p>
+      <h1>Privacy policy</h1>
+      <p class="lede">Short version: GoatMessenger encrypts everything before it leaves your device,
+      collects no more than it needs to connect two goats, and can erase all of it with one button.
+      You can verify every claim in <a href="https://github.com/toastedbread02/GoatMessenger">the source code</a>.</p>
+
+      <h2>1. Who runs this</h2>
+      <p>GoatMessenger is an independent open-source project, built and maintained by
+      <b>@toastedbread02</b> (see <a href="index.html#business">business details</a>). There is no
+      company, no advertising and no data broker behind it. Our mascot is Billy — a real goat with
+      a real account.</p>
+
+      <h2>2. The one principle: you own your relay</h2>
+      <p>GoatMessenger does not run a central server that reads everyone's data. You (or the friend
+      you trust) run the tiny relay program. That means the list below describes what <em>a
+      relay</em> stores — and since you can host your own, you can check it physically, on your own
+      disk. If you use someone else's relay, that person could see the same limited list.</p>
+
+      <h2>3. What we collect (the whole list)</h2>
+      <ul class="legal-list">
+        <li><b>Account basics:</b> your goat name, display name (≤40 chars), short bio (≤120 chars),
+        a profile hue, profile photo and banner (compressed to ~220 KB/~420 KB), and the date you joined.</li>
+        <li><b>Passphrase check:</b> a random salt and a hash of a token derived from your
+        passphrase (scrypt). Your passphrase, and the keys it protects, never leave your device.</li>
+        <li><b>Public key bundle</b> so strangers can find and verify you, plus one encrypted blob
+        ("identity backup") that only your passphrase can open — so you can log in on a new device.</li>
+        <li><b>Contact list:</b> who has sent or accepted a request with whom.</li>
+        <li><b>Message envelopes:</b> only ciphertext — encrypted blobs the relay cannot read —
+        queued per conversation, capped at the last 5,000.</li>
+        <li><b>Attachments:</b> the encrypted files you send are parked on the relay until the
+        recipient fetches them.</li>
+        <li><b>A session token</b> per signed-in device, and a temporary in-memory IP check for
+        rate limiting that is never logged or written.</li>
+        <li><b>Online/offline presence</b> and typing indicators while the app is connected.</li>
+      </ul>
+
+      <h2>4. What nobody ever sees</h2>
+      <p>Message and call contents, attachments in the clear, your passphrase, your private keys,
+      and your key backup are end-to-end encrypted and meaningless to any relay. What a relay
+      <em>can</em> see is metadata: who talks to whom, roughly how much, and when. We say this
+      plainly rather than pretend otherwise.</p>
+
+      <h2>5. The web app (running in your browser)</h2>
+      <p>If you choose <a href="app/">"Continue in browser"</a>, messages, keys and preferences are
+      stored <em>in your browser only</em> (IndexedDB + localStorage) — never synced anywhere, and
+      never readable by us. The website itself sets no cookies and runs no analytics; see the
+      <a href="cookies.html">cookie &amp; storage policy</a>.</p>
+
+      <h2>6. Third-party code and services (the full audit)</h2>
+      <p>We audit nothing quietly — here is every third-party component:</p>
+      <ul class="legal-list">
+        <li><b>noble-hashes / noble-curves (MIT)</b> — vendored cryptography code used to build the
+        X25519/Ed25519/scrypt operations. Runs locally; phones nobody.</li>
+        <li><b>WebRTC calls.</b> Media is peer-to-peer. To find a route, apps contact Google's free
+        public STUN servers (<code>stun.l.google.com</code>) by default — they see your public IP at
+        call time and nothing else. Add your own TURN server in Settings → Network to stop even that.</li>
+        <li><b>GitHub</b> hosts this site (GitHub Pages) and the release downloads. GitHub will see
+        your IP when you load pages, as any web host does.</li>
+        <li><b>That's the entire list.</b> No analytics, no ad networks, no trackers, no fonts CDNs,
+        no support widgets.</li>
+      </ul>
+
+      <h2>7. Only what's needed, and not a byte more</h2>
+      <p>Every field in the signup payload is checked server-side and anything extra is discarded.
+      No email is ever requested — there is nowhere to send spam if we can't see your inbox. Guest
+      accounts get a random name, no email, and only the minimal subset of profile data.</p>
+
+      <h2>8. Deleting your data</h2>
+      <p>In the app: <b>Settings → Profile → Delete account &amp; data</b>. Type your goat name to
+      confirm, and the relay erases your account, profile, key backup, contact rows, message
+      envelopes and uploaded files — your device wipes its local copy too. Your friend's chat loses
+      your messages (they keep their own copies of their own history). You can also just clear the
+      local history per device, or sign out, which forgets the saved login.</p>
+
+      <h2>9. Kids</h2>
+      <p>GoatMessenger is not aimed at children. Signing up requires confirming you are at least 13
+      (older where your local law says so). If a child under that age somehow has an account, use
+      the deletion button above or contact us and we'll help erase it.</p>
+
+      <h2>10. Contact</h2>
+      <p>Questions, deletion requests, data leaks, Wednesday goat pictures:
+      <a href="https://github.com/toastedbread02/GoatMessenger/issues">open a GitHub issue</a>.
+      It is the fastest way to reach the one human maintaining this.</p>
+
+      <p class="legal-foot">Last herded: November 2026. Changes to this policy land with the code
+      they describe — the source of truth is always <a href="https://github.com/toastedbread02/GoatMessenger">the repo</a>.</p>
+    </section>
+  </main>
+
+  <footer class="foot foot-links" id="business">
+    <img src="goat-icon.png" width="30" height="30" alt="">
+    <p>GoatMessenger — built out loud: every line, from the Double Ratchet to the icon renderer,
+       lives in <a href="https://github.com/toastedbread02/GoatMessenger">the open repo</a>.<br>
+       <small>Business details — operated by independent developer <b>@toastedbread02</b>.
+       Contact: <a href="https://github.com/toastedbread02/GoatMessenger/issues">GitHub issues</a>.
+       Site hosted by GitHub Pages; message data lives on relays run by their owners.
+       <a href="privacy.html">Privacy</a> · <a href="terms.html">Terms</a> · <a href="cookies.html">Cookies</a>.</small><br>
+       <small class="mascot-credit">Mascot: <b>Billy</b> 🐐 — a real goat, not an illustration.
+       He keeps his own account, and it's the only one that can carry this checkmark
+       <span class="badge-blue" title="Verified, this is the creator of the app, this can only be set through the actual code." tabindex="0" role="img" aria-label="Verified, this is the creator of the app, this can only be set through the actual code."><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"></circle><path d="M6.8 12.6l3.3 3.3 7-8.2"></path></svg></span></small></p>
+  </footer>
+
+  <script src="site.js"></script>
+</body>
+</html>

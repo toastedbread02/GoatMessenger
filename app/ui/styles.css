@@ -208,6 +208,33 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); text-align: center;
 }
 
+/* consent: age + terms checkboxes shown on the create-account tab only */
+.auth-consents { margin: 2px 0 6px; }
+.auth-consents .check-row input { margin-top: 1px; flex: none; }
+.auth-consents a { color: var(--camel-deep); font-weight: 600; }
+
+/* verified badge — a blue check only the shipped code can grant */
+.badge-verified {
+  position: relative; display: inline-flex; flex: none;
+  width: 16px; height: 16px; margin-left: 6px; vertical-align: -3px; cursor: help;
+}
+.badge-verified svg { width: 100%; height: 100%; }
+.badge-verified circle { fill: #1d9bf0; }
+.badge-verified path { fill: none; stroke: #fff; stroke-width: 2.7; stroke-linecap: round; stroke-linejoin: round; }
+.badge-verified::after {
+  content: attr(data-tip);
+  position: absolute; bottom: calc(100% + 9px); left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: 235px;
+  background: #2e2116; color: #f6ecd9; font-size: 11px; font-weight: 500; line-height: 1.4;
+  padding: 8px 10px; border-radius: 9px; text-align: center;
+  opacity: 0; pointer-events: none; transition: opacity .15s ease;
+  box-shadow: 0 8px 24px rgba(46, 33, 22, .35); white-space: normal; z-index: 60;
+}
+.badge-verified:hover::after, .badge-verified:focus-visible::after { opacity: 1; }
+.pc-name .badge-verified { width: 18px; height: 18px; vertical-align: -4px; }
+.chat-title .badge-verified { vertical-align: -2px; }
+.chat-name .badge-verified { vertical-align: -2px; }
+
 @keyframes rise { from { opacity: 0; transform: translateY(10px) } to { opacity: 1; transform: none } }
 
 /* ------------------------------------------------------------------- shell -- */
@@ -737,6 +764,15 @@ body.call-active .toasts { bottom: 128px; }
 .net-status.bad { color: var(--danger); }
 .net-actions .ghost { flex: none; }
 .net-hint { display: block; margin-top: 10px; font-size: 11px; color: var(--muted); line-height: 1.4; }
+
+.row-item.danger-item {
+  border-color: rgba(176, 86, 58, .35);
+  background: rgba(176, 86, 58, .05);
+}
+.row-item.danger-item .grow > div { color: #8d3f28; }
+.danger-btn { color: #8d3f28; border-color: rgba(176, 86, 58, .4); }
+.danger-btn.primary { background: #b0563a; border-color: #a04a30; color: #fff; }
+.delete-list { margin: 6px 0 10px; padding-left: 20px; font-size: 12.5px; color: var(--ink-3); line-height: 1.6; }
 
 /* --------------------------------------------------------- screen sharing -- */
 

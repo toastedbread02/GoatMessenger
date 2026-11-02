@@ -17,6 +17,20 @@
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
+
+/* accessibility: visible focus for keyboard users, skip past the nav */
+:focus-visible { outline: 3px solid var(--camel-deep); outline-offset: 2px; border-radius: 4px; }
+.skip-link {
+  position: absolute; left: 16px; top: -48px; z-index: 999;
+  padding: 10px 16px; border-radius: 12px;
+  background: var(--ink); color: var(--cream); text-decoration: none; font-weight: 600;
+  transition: top .15s ease;
+}
+.skip-link:focus { top: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .strip span, .billy-cutout, .nf-goat { animation: none !important; }
+  html { scroll-behavior: auto; }
+}
 body {
   margin: 0;
   font-family: var(--font);
@@ -180,6 +194,130 @@ body:has(.web-bar) .shell, body:has(.web-bar) .auth { padding-top: 30px; }
 }
 .foot img { border-radius: 8px; vertical-align: -14px; margin-right: 10px; }
 .foot p { display: inline; max-width: 40em; margin: 0; font-size: 14.5px; color: var(--ink-3); }
+.foot.foot-links { padding-bottom: 34px; }
+.foot-links small { display: block; max-width: 46em; margin: 10px auto 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.foot-links .mascot-credit { font-size: 12.5px; color: var(--ink-3); }
+.foot-links .mascot-credit b + .badge-blue { vertical-align: -3px; }
+
+/* legal pages */
+.legal { max-width: 46em; padding: 46px 0 40px; }
+.legal h1 { font-size: clamp(32px, 4.4vw, 48px); }
+.legal h2 { font-size: 21px; margin: 30px 0 8px; }
+.legal p { font-size: 15px; color: var(--ink-3); margin: 8px 0; }
+.legal li { font-size: 14.5px; color: var(--ink-3); margin: 6px 0; }
+.legal-list { padding-left: 22px; margin: 10px 0; }
+.legal-foot { margin-top: 28px; font-size: 12.5px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 14px; }
+.legal code {
+  background: rgba(74, 54, 36, .08); padding: 1px 6px; border-radius: 6px; font-size: .92em;
+}
+
+/* the verified badge (site side) — blue check + hover tip */
+.badge-blue {
+  position: relative; display: inline-flex; flex: none;
+  width: 15px; height: 15px; vertical-align: -2px; cursor: help;
+}
+.badge-blue svg { width: 100%; height: 100%; }
+.badge-blue circle { fill: #1d9bf0; }
+.badge-blue path { fill: none; stroke: #fff; stroke-width: 2.7; stroke-linecap: round; stroke-linejoin: round; }
+.badge-blue::after {
+  content: attr(title);
+  position: absolute; bottom: calc(100% + 9px); left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: 240px;
+  background: #2e2116; color: #f6ecd9; font-size: 11px; line-height: 1.4;
+  padding: 8px 10px; border-radius: 9px; text-align: center;
+  opacity: 0; pointer-events: none; transition: opacity .15s ease;
+  box-shadow: 0 8px 24px rgba(46, 33, 22, .35); white-space: normal; z-index: 80;
+}
+.badge-blue:hover::after, .badge-blue:focus-visible::after { opacity: 1; }
+.billy-card .badge-blue { width: 16px; height: 16px; vertical-align: 0; }
+
+/* cookie-choice banner — two equal, honest buttons; nothing tricks you */
+.cookie-bar {
+  position: fixed; left: 18px; right: 18px; bottom: 18px; z-index: 500;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  max-width: 860px; margin: 0 auto;
+  background: var(--ink); color: #f2e3c9;
+  border: 1px solid rgba(255, 250, 240, .16);
+  border-radius: 16px; box-shadow: 0 18px 50px rgba(46, 33, 22, .35);
+  padding: 13px 16px 13px 20px;
+}
+.cookie-bar p { margin: 0; font-size: 13px; line-height: 1.5; flex: 1 1 280px; color: #ecdcC2; }
+.cookie-bar em { font-style: normal; font-weight: 700; color: #fff; }
+.cookie-bar a { color: var(--camel-pale); }
+.cookie-btn {
+  flex: 0 0 auto; padding: 9px 16px; border-radius: 11px; font-size: 13px; font-weight: 650;
+  border: 1px solid rgba(255, 250, 240, .35); background: transparent; color: inherit;
+  cursor: pointer; transition: background .15s ease, border-color .15s ease;
+}
+.cookie-btn:hover { background: rgba(255, 250, 240, .12); border-color: rgba(255, 250, 240, .6); }
+
+/* meet Billy ---------------------------------------------------------------- */
+.billy {
+  display: grid; grid-template-columns: .9fr 1.1fr; gap: 40px; align-items: center;
+  padding: 66px 0 30px;
+}
+.billy-photo {
+  border-radius: 20px; overflow: hidden; position: relative;
+  border: 1px solid var(--line); box-shadow: var(--shadow);
+  transform: rotate(-1.2deg); background: var(--paper);
+}
+.billy-photo img { display: block; width: 100%; }
+.billy-photo::after {
+  content: "actual Billy · 100% real";
+  position: absolute; right: 10px; bottom: 10px;
+  background: rgba(46, 33, 22, .82); color: #f2e3c9;
+  font-size: 11px; padding: 5px 10px; border-radius: 999px;
+}
+.billy-lede { color: var(--ink-3); max-width: 34em; }
+.billy-card {
+  margin-top: 20px; display: flex; gap: 16px; align-items: center;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 18px;
+  padding: 16px 18px; box-shadow: 0 2px 10px rgba(58, 40, 22, .06);
+}
+.billy-name { font-family: var(--serif); font-size: 19px; font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 7px; }
+.billy-handle { font-size: 12.5px; color: var(--muted); letter-spacing: .02em; }
+.billy-bio { margin-top: 6px; font-size: 13.5px; color: var(--ink-3); line-height: 1.5; }
+/* Cut-out Billy breathes: a slow, shallow scale — distinct from the 404 graze */
+.billy-cutout {
+  width: 74px; height: 74px; object-fit: contain; flex: none;
+  filter: drop-shadow(0 0 1.6px #fff) drop-shadow(0 0 3.4px #fff);
+  animation: billy-breathe 4.8s ease-in-out infinite;
+}
+@keyframes billy-breathe {
+  0%, 100% { transform: scale(1) translateY(0); }
+  50% { transform: scale(1.035) translateY(-2px); }
+}
+
+/* 404 ------------------------------------------------------------------------ */
+.notfound { display: grid; place-items: center; padding: 60px 0 90px; }
+.nf-card {
+  text-align: center; max-width: 560px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 24px;
+  box-shadow: var(--shadow); padding: 40px 34px 38px;
+}
+.nf-goat {
+  width: 110px; height: 110px; margin: -96px auto 6px; border-radius: 999px;
+  background: var(--cream) url("billy.png") center / 120% auto no-repeat;
+  background-position: center 30%;
+  border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(58, 40, 22, .14);
+  filter: drop-shadow(0 0 5px rgba(247, 239, 225, .9));
+  animation: billy-graze 5.5s ease-in-out infinite;
+}
+@keyframes billy-graze {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  45% { transform: translateY(7px) rotate(3deg); }
+  62% { transform: translateY(9px) rotate(4deg); }
+  78% { transform: translateY(2px) rotate(-1deg); }
+}
+.nf-code {
+  font-family: var(--serif); font-size: 64px; font-weight: 700; color: var(--ink);
+  margin: 4px 0 0; letter-spacing: .02em;
+}
+.nf-code .nf-horn { color: var(--camel-deep); }
+.nf-card h1 { font-size: 26px; margin: 6px 0 8px; }
+.nf-card > p { font-size: 14.5px; color: var(--ink-3); margin: 0 auto 20px; max-width: 30em; }
+.nf-actions { display: grid; gap: 10px; }
+.nf-actions .dl-btn { justify-content: center; }
 
 @media (max-width: 940px) {
   .hero { grid-template-columns: 1fr; padding-top: 30px; }
@@ -188,4 +326,6 @@ body:has(.web-bar) .shell, body:has(.web-bar) .auth { padding-top: 30px; }
   .enc-grid { grid-template-columns: 1fr; }
   .nav-links { gap: 16px; }
   .dl-row { grid-template-columns: 1fr; }
+  .billy { grid-template-columns: 1fr; }
+  .cookie-bar { left: 10px; right: 10px; bottom: 10px; }
 }

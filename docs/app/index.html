@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
+<html lang="en"><head>
+  <meta charset="utf-8">
 <title>GoatMessenger — run in browser</title>
 <meta name="color-scheme" content="light dark">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* http://*:* ws://*:* https: wss:; font-src 'self' data:; object-src 'none'; base-uri 'none'">
+<link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="stylesheet" href="ui/styles.css">
 </head>
 <body>
@@ -79,6 +79,16 @@
           <span>Repeat passphrase</span>
           <input id="auth-pass2" type="password" placeholder="same passphrase">
         </label>
+        <div class="auth-consents" id="field-consent" hidden>
+          <label class="check-row">
+            <input type="checkbox" id="auth-age">
+            <span>I am at least 13 years old</span>
+          </label>
+          <label class="check-row">
+            <input type="checkbox" id="auth-terms">
+            <span>I agree to the <a href="https://toastedbread02.github.io/GoatMessenger/terms.html" target="_blank" rel="noopener">Terms of service</a> and the <a href="https://toastedbread02.github.io/GoatMessenger/privacy.html" target="_blank" rel="noopener">Privacy policy</a></span>
+          </label>
+        </div>
         <p class="auth-hint" id="auth-hint">Your passphrase unlocks your private keys. It is never sent to the relay.</p>
         <button class="primary" id="auth-submit" type="submit">Sign in</button>
         <button class="ghost auth-guest" id="btn-guest" type="button">🐐 Continue as guest</button>

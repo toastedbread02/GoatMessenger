@@ -1,0 +1,16 @@
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+
+[dn]
+CN = GoatMessenger
+OU = GoatSoftware
+O = GoatMessenger
+C = US
+
+[v3]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+subjectKeyIdentifier = hash

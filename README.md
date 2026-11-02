@@ -211,3 +211,20 @@ counter reports the forwarded packets.
 ```bash
 rm -rf ~/Library/Application\ Support/goatmessenger   # accounts, keys, local history
 ```
+
+## Mascot, policies & data handling
+
+- **Billy** — the mascot is not a drawing: he's the developer's real goat, with his own account
+  (`@billy`). The blue checkmark on it can only come from `app/shared/verified.mjs` — a relay
+  operator cannot mint one by editing their database.
+- **Privacy / Terms / Cookies** — shipped as website pages in `docs/` (privacy.html, terms.html,
+  cookies.html). The app's signup form requires an age-13+ confirmation and a terms consent
+  checkbox before an account can be created.
+- **Data minimization** — the relay stores only what it needs to connect goats: basic profile
+  fields, a scrypt auth token hash, public key bundles, one encrypted identity backup, contact
+  relations, ciphertext (≤5000 msgs/room) and encrypted attachments. No email, no analytics, no
+  third-party trackers anywhere (the site's only scripts are served from its own domain).
+- **Right to deletion** — Settings → Profile → *Delete account & data* calls `DELETE /api/account`:
+  the relay erases the account, profile, key backup, contact rows, all conversation envelopes and
+  every uploaded file of that user, and the device wipes its local history and keys too.
+

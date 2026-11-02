@@ -93,4 +93,11 @@ export class Vault {
     this.msgCache.clear();
     this.sessionCache.clear();
   }
+
+  /* Full local erase — the counterpart of deleting the account on the relay. */
+  async wipeAll() {
+    await idb.wipe();
+    this.msgCache.clear();
+    this.sessionCache.clear();
+  }
 }

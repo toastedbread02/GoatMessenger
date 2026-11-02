@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cookie &amp; storage policy — GoatMessenger</title>
+  <meta name="description" content="GoatMessenger sets zero tracking cookies. Here is exactly what is stored in your browser, your desktop app and your relay — and how to wipe it.">
+  <meta name="theme-color" content="#f7efe1">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="icon" type="image/png" href="goat-icon.png">
+  <link rel="apple-touch-icon" href="billy-round.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#page">Skip to content</a>
+  <header class="nav">
+    <a class="brand" href="index.html"><img src="goat-icon.png" alt="" width="34" height="34"><span>GoatMessenger</span></a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="index.html">Home</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+      <a href="https://github.com/toastedbread02/GoatMessenger">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="page">
+    <section class="legal">
+      <p class="kicker">cookies &amp; storage</p>
+      <h1>Cookie &amp; storage policy</h1>
+      <p class="lede">Our cookies so far: zero. No analytics, no ad trackers, no pixel, no
+      third-party script — the site has nothing to put in one. This page tells you what
+      <em>is</em> stored on your machine, because honest storage beats a dark-pattern "Accept All"
+      wall.</p>
+
+      <h2>1. This website</h2>
+      <p>When the small banner at the bottom of the pages asks about cookies, it is recording
+      <b>your choice</b>: one entry (<code>gm:cookieChoice</code>) in your browser's localStorage,
+      plus the date it was made. That's it. Declining changes nothing about this site, because it
+      sets nothing either — but you asked for the choice, so you get it, with two equally sized
+      buttons and no "Necessary cookies" excuse-trap.</p>
+
+      <h2>2. The web app (Continue in browser)</h2>
+      <p>Running the app in your browser stores <b>everything on your own machine</b>:</p>
+      <ul class="legal-list">
+        <li><b>IndexedDB</b> — your decrypted conversation history, your ratchet state, your
+        preferences, your per-chat verification marks. Namespaced per account.</li>
+        <li><b>localStorage</b> — username of the last signed-in goat, chosen theme, developer-mode
+        flag, cookie choice. No tokens, no identity material.</li>
+        <li><b>Clearing it:</b> deleting the account (Settings → Profile → Delete account &amp;
+        data) wipes the app's storage in one go. Or clear site data in your browser whenever you
+        want — everything simply resets.</li>
+      </ul>
+
+      <h2>3. The desktop app (macOS / Windows)</h2>
+      <p>The desktop builds put data where an operating system keeps it properly:</p>
+      <ul class="legal-list">
+        <li><b>Session + private identity</b> live in the OS keychain (macOS Keychain / Windows
+        Credential Manager) so "stay signed in" never touches disk in the clear.</li>
+        <li><b>Chat history and preferences</b> live in the app's local user-data folder.</li>
+        <li><b>Clearing it:</b> Settings → Privacy → Clear local history, or sign out, or delete
+        the account entirely for a full wipe.</li>
+      </ul>
+
+      <h2>4. The relay (server side)</h2>
+      <p>The relay stores no cookies either — it speaks HTTP with bearer tokens, no session cookies at all. What it does store is in <a href="privacy.html#3">the privacy policy, §3</a>:
+      account basics, contact relations, queued ciphertext and encrypted uploads. Its owner — for
+      a self-hosted relay, that means <em>you</em> — can read that folder anytime.</p>
+
+      <h2>5. Third-party trackers</h2>
+      <p>None. Loading this site fetches: the page, a stylesheet, one PNG goat, one script (the
+      banner, served from the same domain), and screenshots. The web app is served from the same
+      GitHub Pages origin. There is no CDN fingerprinting you, no font beacon, no "HMRC-approved"
+      analytics to discover later.</p>
+
+      <p class="legal-foot">Last herded: November 2026.</p>
+    </section>
+  </main>
+
+  <footer class="foot foot-links" id="business">
+    <img src="goat-icon.png" width="30" height="30" alt="">
+    <p>GoatMessenger — built out loud: every line, from the Double Ratchet to the icon renderer,
+       lives in <a href="https://github.com/toastedbread02/GoatMessenger">the open repo</a>.<br>
+       <small>Business details — operated by independent developer <b>@toastedbread02</b>.
+       Contact: <a href="https://github.com/toastedbread02/GoatMessenger/issues">GitHub issues</a>.
+       Site hosted by GitHub Pages; message data lives on relays run by their owners.
+       <a href="privacy.html">Privacy</a> · <a href="terms.html">Terms</a> · <a href="cookies.html">Cookies</a>.</small><br>
+       <small class="mascot-credit">Mascot: <b>Billy</b> 🐐 — a real goat, not an illustration.
+       He keeps his own account, and it's the only one that can carry this checkmark
+       <span class="badge-blue" title="Verified, this is the creator of the app, this can only be set through the actual code." tabindex="0" role="img" aria-label="Verified, this is the creator of the app, this can only be set through the actual code."><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"></circle><path d="M6.8 12.6l3.3 3.3 7-8.2"></path></svg></span></small></p>
+  </footer>
+
+  <script src="site.js"></script>
+</body>
+</html>
