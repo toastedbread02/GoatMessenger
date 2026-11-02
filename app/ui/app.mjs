@@ -1780,19 +1780,24 @@ function profilePane() {
       renderPreview();
     } catch (err) { toast(err.message, 'err'); }
   };
-  avatarBox.addEventListener('click', setAvatar);
-  bannerBox.addEventListener('click', setBanner);
-  const removeAvatar = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { draft.avatar = ''; paintPickers(); renderPreview(); } });
-  const removeBanner = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { draft.banner = ''; paintPickers(); renderPreview(); } });
+  avatarBox.addEventListener('click', () => { if (requireLogin()) setAvatar(); });
+  bannerBox.addEventListener('click', () => { if (requireLogin()) setBanner(); });
+  const removeAvatar = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { if (!requireLogin() || !draft.avatar) return; draft.avatar = ''; paintPickers(); renderPreview(); } });
+  const removeBanner = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { if (!requireLogin() || !draft.banner) return; draft.banner = ''; paintPickers(); renderPreview(); } });
 
   const nameInput = el('input', { value: draft.displayName, maxlength: '40', placeholder: S.me.username });
   const aboutInput = el('input', { value: draft.about, placeholder: 'a goat of few words', maxlength: '120' });
+  const guestLock = S.isGuest
+    ? el('small', { class: 'net-hint', text: 'Guests keep a basic profile. Log in or create an account to edit photos, banner or name.' })
+    : null;
+  if (S.isGuest) { nameInput.disabled = true; aboutInput.disabled = true; }
   nameInput.addEventListener('input', () => { draft.displayName = nameInput.value.trim() || S.me.username; renderPreview(); });
   aboutInput.addEventListener('input', () => { draft.about = aboutInput.value.trim(); renderPreview(); });
 
   return el('div', {},
     el('small', { class: 'net-hint', text: 'This is the profile card other goats see — live preview:' }),
     previewBox,
+    guestLock,
     el('div', { class: 'pick-row' },
       el('div', { class: 'field pick-field' }, el('span', { text: 'Profile photo' }), avatarBox, removeAvatar),
       el('div', { class: 'field pick-field' }, el('span', { text: 'Banner' }), bannerBox, removeBanner)),
@@ -1804,6 +1809,7 @@ function profilePane() {
         class: 'primary small',
         text: 'Save profile',
         onclick: async () => {
+          if (!requireLogin()) return;
           try {
             const res = await S.api.updateProfile({
               displayName: nameInput.value.trim() || S.me.username,
