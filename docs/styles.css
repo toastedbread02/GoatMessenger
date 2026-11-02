@@ -126,7 +126,7 @@ body:has(.web-bar) .shell, body:has(.web-bar) .auth { padding-top: 30px; }
 }
 .strip span {
   display: inline-block; padding: 9px 0; font-size: 13.5px; color: var(--ink-3);
-  animation: slide 38s linear infinite;
+  animation: slide 56s linear infinite;
 }
 @keyframes slide { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
