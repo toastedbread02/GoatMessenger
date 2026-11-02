@@ -156,13 +156,15 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 }
 .auth-tag {
   margin: 12px 0 38px; font-size: 15.5px; max-width: 24ch; line-height: 1.45;
-  color: rgba(45, 30, 16, .78);
+  font-weight: 500;
+  color: #2b1b0d;
+  text-shadow: 0 1px 0 rgba(255, 249, 235, .22);
   animation: rise .6s .1s var(--ease) both;
 }
 .auth-points { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; max-width: 34ch; }
 .auth-points li {
   display: flex; gap: 11px; align-items: flex-start; font-size: 13.5px; line-height: 1.4;
-  color: rgba(45, 30, 16, .82);
+  color: #2b1b0d;
   animation: rise .6s .16s var(--ease) both;
 }
 .auth-points svg { width: 17px; height: 17px; margin-top: 1px; opacity: .8; flex: none; }
@@ -886,8 +888,10 @@ body.call-active .toasts { bottom: 128px; }
 :root[data-theme="dark"] .auth-panel { background: var(--paper); }
 :root[data-theme="dark"] .auth-art {
   background: linear-gradient(160deg, #4a3823 0%, #38291a 52%, #2a1e12 100%);
-  color: #e8d7bb;
+  color: #f3e6cd;
 }
+:root[data-theme="dark"] .auth-tag,
+:root[data-theme="dark"] .auth-points li { color: #f7ecd6; text-shadow: none; }
 :root[data-theme="dark"] .tab { color: var(--ink-3); }
 :root[data-theme="dark"] .tab.is-on { background: #2a2015; color: var(--ink); }
 :root[data-theme="dark"] .field input { background: #17120c; border-color: var(--line); color: var(--ink); }

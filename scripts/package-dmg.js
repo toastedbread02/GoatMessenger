@@ -17,6 +17,7 @@ const RW = path.join(BUILD, 'goatmessenger-rw.dmg');
 const OUT = path.join(DIST, 'GoatMessenger.dmg');
 const APP = path.join(DIST, 'GoatMessenger.app');
 const VOLNAME = 'GoatMessenger';
+const WIN_SIZE = { w: 1050, h: 680 };
 
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: 'inherit', ...opts });
 const sleepSync = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
@@ -58,8 +59,8 @@ if (!fs.existsSync(mountPoint)) {
   process.exit(1);
 }
 
-// Finder centres its windows itself; the layout below is in {x, y} from the
-// top-left of the 1440x900 window, matching make-dmg-bg.js's artwork.
+// The layout below is in {x, y} from the top-left of the 1050x680 window,
+// matching make-dmg-bg.js's artwork.
 console.log('• laying out the install window…');
 sleepSync(2000); // give Finder a beat to notice the new volume
 const layout = `
@@ -69,18 +70,17 @@ tell application "Finder"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set the bounds of container window to {0, 0, ${1440}, ${900}}
+    set the bounds of container window to {0, 0, ${WIN_SIZE.w}, ${WIN_SIZE.h}}
     set viewOptions to the icon view options of container window
     set arrangement of viewOptions to not arranged
-    set icon size of viewOptions to 128
-    set text size of viewOptions to 14
+    set icon size of viewOptions to 96
+    set text size of viewOptions to 13
     set background picture of viewOptions to file ".background:background.png"
     delay 1
-    set position of item "GoatMessenger.app" of container window to {240, 640}
-    set position of item "Applications" of container window to {1200, 640}
-    delay 1
+    set position of item "GoatMessenger.app" of container window to {150, 440}
+    set position of item "Applications" of container window to {900, 440}
+    delay 2
     update
-    close
   end tell
 end tell
 `;
@@ -91,11 +91,15 @@ try {
 }
 
 console.log('• ejecting…');
+// Eject through Finder while the window is still open — closing first lets
+// Finder discard the view options, and a plain hdiutil detach can skip the
+// .DS_Store flush entirely.
 try {
-  run('hdiutil', ['detach', mountPoint], { stdio: 'ignore' });
+  execFileSync('osascript', ['-e', `tell application "Finder" to eject disk "${VOLNAME}"`], { stdio: 'ignore' });
 } catch {
-  run('hdiutil', ['detach', '-force', mountPoint], { stdio: 'ignore' });
+  try { run('hdiutil', ['detach', mountPoint], { stdio: 'ignore' }); } catch { run('hdiutil', ['detach', '-force', mountPoint], { stdio: 'ignore' }); }
 }
+sleepSync(1500);
 
 console.log('• compressing…');
 fs.rmSync(OUT, { force: true });
