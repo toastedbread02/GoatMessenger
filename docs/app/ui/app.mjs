@@ -36,7 +36,7 @@ const S = {
   recordingTimer: null,
   droppedEnvelopes: 0,
   themeMode: 'system',
-  settingsCat: 'account',
+  settingsCat: 'profile',
 };
 
 const EMOJI = ['🐐', '🐑', '🌿', '🌾', '🔥', '✨', '😄', '😂', '🥹', '😎', '🤝', '👋', '👍', '🙏', '💚', '💛',
@@ -99,6 +99,14 @@ function displayName(peer) {
 
 function accentOf(peer) {
   return S.contacts.get(String(peer).toLowerCase())?.accent ?? 30;
+}
+
+function avatarOf(peer) {
+  return S.contacts.get(String(peer).toLowerCase())?.avatar || '';
+}
+
+function bannerOf(peer) {
+  return S.contacts.get(String(peer).toLowerCase())?.banner || '';
 }
 
 function unsentTotal() {
@@ -390,7 +398,10 @@ async function handleWsEvent(msg) {
     case 'profile': {
       const peer = msg.user.username.toLowerCase();
       const existing = S.contacts.get(peer);
-      if (existing) Object.assign(existing, { displayName: msg.user.displayName, about: msg.user.about, accent: msg.user.accent });
+      if (existing) Object.assign(existing, {
+        displayName: msg.user.displayName, about: msg.user.about, accent: msg.user.accent,
+        avatar: msg.user.avatar, banner: msg.user.banner,
+      });
       renderChatList();
       if (S.activePeer === peer) renderHeader();
       break;
@@ -633,8 +644,7 @@ function rememberUnread() {
 /* ================================================================ rendering */
 
 function renderMe() {
-  const me = S.me;
-  D.paintAvatar($('#me-avatar'), { name: me.displayName || me.username, accent: me.accent });
+  const me = S.me;    D.paintAvatar($('#me-avatar'), { name: me.displayName || me.username, accent: me.accent, avatar: me.avatar });
   $('#me-name').textContent = me.displayName || me.username;
   if (S.api?.ws && S.api.ws.readyState === WebSocket.OPEN) {
     $('#me-status').innerHTML = '';
@@ -658,6 +668,7 @@ function contactRowSig(peer) {
   return JSON.stringify([
     S.activePeer === peer,
     rec?.displayName, rec?.accent, isOnline(peer),
+    rec?.avatar || '', rec?.banner || '',
     last?.ts || rec?.last?.ts || rec?.since || 0, rec?.since,
     (S.typingUntil.get(peer) || 0) > Date.now(),
     last ? previewText(last) : '',
@@ -678,7 +689,7 @@ function contactRow(peer, { fresh = true } = {}) {
   });
   const avatar = el('div', { class: 'avatar' });
   D.paintAvatar(avatar, {
-    name: rec.displayName || rec.username, accent: rec.accent, online: isOnline(peer), showPresence: true,
+    name: rec.displayName || rec.username, accent: rec.accent, online: isOnline(peer), showPresence: true, avatar: rec.avatar,
   });
   const main = el('div', { class: 'chat-main' });
   const top = el('div', { class: 'chat-top' },
@@ -797,8 +808,7 @@ function renderRequests() {
   box.hidden = false;
   for (const req of incoming) {
     const card = el('div', { class: 'request-card' });
-    const avatar = el('div', { class: 'avatar' });
-    D.paintAvatar(avatar, { name: req.displayName || req.username, accent: req.accent });
+    const avatar = el('div', { class: 'avatar' });      D.paintAvatar(avatar, { name: req.displayName || req.username, accent: req.accent, avatar: req.avatar });
     card.append(avatar,
       el('div', { class: 'request-text' },
         el('b', { text: req.displayName || req.username }),
@@ -810,8 +820,7 @@ function renderRequests() {
   }
   for (const req of outgoing) {
     const card = el('div', { class: 'request-card' });
-    const avatar = el('div', { class: 'avatar' });
-    D.paintAvatar(avatar, { name: req.displayName || req.username, accent: req.accent });
+    const avatar = el('div', { class: 'avatar' });      D.paintAvatar(avatar, { name: req.displayName || req.username, accent: req.accent, avatar: req.avatar });
     card.append(avatar,
       el('div', { class: 'request-text' },
         el('b', { text: req.displayName || req.username }),
@@ -845,7 +854,7 @@ function renderHeader() {
   if (!peer) return;
   const rec = S.contacts.get(peer);
   const avatar = $('#peer-avatar');
-  D.paintAvatar(avatar, { name: rec?.displayName || peer, accent: rec?.accent, online: isOnline(peer), showPresence: true });
+  D.paintAvatar(avatar, { name: rec?.displayName || peer, accent: rec?.accent, online: isOnline(peer), showPresence: true, avatar: rec?.avatar });
   $('#peer-name').textContent = rec?.displayName || peer;
 
   const sub = $('#peer-sub');
@@ -1042,7 +1051,7 @@ function messageRowNode(rec, prev, next, { fresh = true } = {}) {
   if (rec.dir === 'in') {
     if (!sameNext) {
       const avatar = el('div', { class: 'avatar msg-avatar' });
-      D.paintAvatar(avatar, { name: displayName(peer), accent: accentOf(peer) });
+      D.paintAvatar(avatar, { name: displayName(peer), accent: accentOf(peer), avatar: avatarOf(peer) });
       row.append(avatar);
     } else {
       row.append(el('div', { class: 'spacer' }));
@@ -1498,7 +1507,7 @@ function openAddContact() {
       const found = await S.api.lookup(name);
       const row = el('div', { class: 'picker-row' });
       const avatar = el('div', { class: 'avatar' });
-      D.paintAvatar(avatar, { name: found.user.displayName, accent: found.user.accent });
+      D.paintAvatar(avatar, { name: found.user.displayName, accent: found.user.accent, avatar: found.user.avatar });
       row.append(avatar, el('div', { class: 'chat-name', text: found.user.displayName }),
         el('span', { class: 'chip', text: found.state === 'accepted' ? 'connected' : found.state === 'in' ? 'wants you' : found.user.presence }));
       row.addEventListener('click', async () => {
@@ -1532,6 +1541,79 @@ function openAddContact() {
 }
 
 /* ------------------------------------------------------------------ settings */
+
+/* ------------------------------------------------------------ profile cards -- */
+
+function joinedLabel(ts) {
+  if (!ts) return '';
+  return new Date(ts).toLocaleDateString([], { month: 'long', year: 'numeric' });
+}
+
+// The card shown for yourself (live preview in Settings → Profile) and when
+// someone clicks a chat header — shared so the two always look the same.
+function profileCard(user) {
+  const hue = 22 + (Math.abs(Number(user.accent) || 0) % 17);
+  const banner = el('div', { class: 'pc-banner' });
+  banner.style.setProperty('--h', hue);
+  if (user.banner) banner.style.backgroundImage = `url("${user.banner}")`;
+  const avatar = el('div', { class: 'avatar big pc-avatar' });
+  D.paintAvatar(avatar, { name: user.displayName || user.username, accent: user.accent, avatar: user.avatar });
+  return el('div', { class: 'profile-card' },
+    banner,
+    el('div', { class: 'pc-main' },
+      avatar,
+      el('div', { class: 'pc-id' },
+        el('div', { class: 'pc-name', text: user.displayName || user.username }),
+        el('div', { class: 'pc-handle', text: `@${user.username || ''}` })),
+      user.about ? el('p', { class: 'pc-about', text: user.about }) : null,
+      el('div', { class: 'pc-chips' },
+        user.presence ? el('span', { class: `presence-chip${user.presence === 'online' ? ' on' : ''}` }, el('i', { class: 'dot' }), el('span', { text: user.presence })) : null,
+        joinedLabel(user.createdAt) ? el('span', { class: 'chip', text: `in the herd since ${joinedLabel(user.createdAt)}` }) : null)));
+}
+
+// Clicking the peer's name/avatar in a chat header opens their card.
+function openPeerProfile(peer) {
+  const key = String(peer).toLowerCase();
+  const rec = S.contacts.get(key);
+  if (!rec) return;
+  const card = profileCard({ ...rec, presence: isOnline(key) ? 'online' : 'offline' });
+  const modal = el('div', { class: 'modal profile-modal' },
+    card,
+    rec.state === 'accepted' ? el('span', { class: 'chip', text: 'connected · end-to-end encrypted' }) : null);
+  openModal(modal);
+}
+
+// Center-crop an image file to a fixed square/rect Data URL (JPEG).
+function readImageThumb(file, { w, h, quality = 0.85 }) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const aspect = w / h;
+      let sx = 0; let sy = 0; let sw = img.naturalWidth; let sh = img.naturalHeight;
+      if (sw / sh > aspect) { sw = sh * aspect; sx = (img.naturalWidth - sw) / 2; }
+      else { sh = sw / aspect; sy = (img.naturalHeight - sh) / 2; }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That image could not be read.')); };
+    img.src = url;
+  });
+}
+
+function pickImage(kind) {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/webp';
+    input.onchange = () => resolve(input.files?.[0] || null);
+    input.click();
+  });
+}
 
 // Relay + TURN: the two addresses that let two goats in different countries
 // reach each other. Messages ride the relay (ciphertext only); calls use TURN.
@@ -1651,10 +1733,69 @@ function themePicker() {
   return el('div', { class: 'field' }, el('span', { text: 'Theme' }), seg);
 }
 
-function accountPane() {
-  const nameInput = el('input', { value: S.me.displayName || '', maxlength: '40' });
-  const aboutInput = el('input', { value: S.me.about || '', placeholder: 'a goat of few words', maxlength: '120' });
+function profilePane() {
+  const draft = {
+    displayName: S.me.displayName || '',
+    about: S.me.about || '',
+    accent: S.me.accent,
+    avatar: S.me.avatar || '',
+    banner: S.me.banner || '',
+  };
+
+  // Live preview: exactly the card peers see when they click your profile.
+  const previewBox = el('div', { class: 'profile-preview' });
+  const renderPreview = () => {
+    previewBox.innerHTML = '';
+    previewBox.append(profileCard({ ...draft, username: S.me.username, createdAt: S.me.createdAt }));
+  };
+  renderPreview();
+
+  const avatarBox = el('button', { class: 'pick pick-avatar avatar', type: 'button', title: 'Choose a profile photo' });
+  const bannerBox = el('button', { class: 'pick pick-banner', type: 'button', title: 'Choose a banner' });
+  const paintPickers = () => {
+    D.paintAvatar(avatarBox, { name: draft.displayName || S.me.username, accent: draft.accent, avatar: draft.avatar });
+    avatarBox.classList.toggle('has-img', Boolean(draft.avatar));
+    bannerBox.style.setProperty('--h', 22 + (Math.abs(Number(draft.accent) || 0) % 17));
+    if (draft.banner) bannerBox.style.backgroundImage = `url("${draft.banner}")`;
+    else bannerBox.style.backgroundImage = '';
+    bannerBox.classList.toggle('has-img', Boolean(draft.banner));
+  };
+  paintPickers();
+
+  const setAvatar = async () => {
+    const file = await pickImage();
+    if (!file) return;
+    try {
+      draft.avatar = await readImageThumb(file, { w: 256, h: 256, quality: 0.86 });
+      paintPickers();
+      renderPreview();
+    } catch (err) { toast(err.message, 'err'); }
+  };
+  const setBanner = async () => {
+    const file = await pickImage();
+    if (!file) return;
+    try {
+      draft.banner = await readImageThumb(file, { w: 960, h: 320, quality: 0.82 });
+      paintPickers();
+      renderPreview();
+    } catch (err) { toast(err.message, 'err'); }
+  };
+  avatarBox.addEventListener('click', setAvatar);
+  bannerBox.addEventListener('click', setBanner);
+  const removeAvatar = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { draft.avatar = ''; paintPickers(); renderPreview(); } });
+  const removeBanner = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { draft.banner = ''; paintPickers(); renderPreview(); } });
+
+  const nameInput = el('input', { value: draft.displayName, maxlength: '40', placeholder: S.me.username });
+  const aboutInput = el('input', { value: draft.about, placeholder: 'a goat of few words', maxlength: '120' });
+  nameInput.addEventListener('input', () => { draft.displayName = nameInput.value.trim() || S.me.username; renderPreview(); });
+  aboutInput.addEventListener('input', () => { draft.about = aboutInput.value.trim(); renderPreview(); });
+
   return el('div', {},
+    el('small', { class: 'net-hint', text: 'This is the profile card other goats see — live preview:' }),
+    previewBox,
+    el('div', { class: 'pick-row' },
+      el('div', { class: 'field pick-field' }, el('span', { text: 'Profile photo' }), avatarBox, removeAvatar),
+      el('div', { class: 'field pick-field' }, el('span', { text: 'Banner' }), bannerBox, removeBanner)),
     el('label', { class: 'field' }, el('span', { text: 'Display name' }), nameInput),
     el('label', { class: 'field' }, el('span', { text: 'About' }), aboutInput),
     el('div', { class: 'net-actions', style: { justifyContent: 'flex-end', margin: '0 0 14px' } },
@@ -1664,7 +1805,12 @@ function accountPane() {
         text: 'Save profile',
         onclick: async () => {
           try {
-            const res = await S.api.updateProfile({ displayName: nameInput.value.trim() || S.me.username, about: aboutInput.value.trim() });
+            const res = await S.api.updateProfile({
+              displayName: nameInput.value.trim() || S.me.username,
+              about: aboutInput.value.trim(),
+              avatar: draft.avatar,
+              banner: draft.banner,
+            });
             S.me = { ...S.me, ...res.me };
             renderMe();
             renderChatList();
@@ -1782,20 +1928,20 @@ function devPane() {
     el('small', { class: 'net-hint', text: 'Developer tools for poking at relays, TURN and diagnostics. Unlock: About → tap the version 5 times.' }));
 }
 
-function openSettings(category = S.settingsCat || 'account') {
+function openSettings(category = S.settingsCat || 'profile') {
   const panes = {
-    account: accountPane,
+    profile: profilePane,
     appearance: appearancePane,
     network: networkPane,
     privacy: privacyPane,
     about: aboutPane,
     ...(devUnlocked() ? { dev: devPane } : {}),
   };
-  if (!panes[category]) category = 'account';
+  if (!panes[category]) category = 'profile';
   S.settingsCat = category;
 
   const labels = {
-    account: ['Account', 'users'],
+    profile: ['Profile', 'users'],
     appearance: ['Appearance', 'smile'],
     network: ['Network', 'screen'],
     privacy: ['Security', 'lock'],
@@ -1910,7 +2056,7 @@ function buildCallManager() {
       const card = $('#incoming');
       card.dataset.kind = kind === 'video' ? 'video' : 'audio';
       card.hidden = false;
-      D.paintAvatar($('#incoming-avatar'), { name: displayName(peer), accent: accentOf(peer) });
+      D.paintAvatar($('#incoming-avatar'), { name: displayName(peer), accent: accentOf(peer), avatar: avatarOf(peer) });
       $('#incoming-name').textContent = displayName(peer);
       $('#incoming-sub').textContent = kind === 'video' ? 'Incoming video call · encrypted' : 'Incoming voice call · encrypted';
       card.dataset.peer = peer;
@@ -1998,7 +2144,7 @@ function renderCall(state) {
   layer.hidden = false;
   document.body.classList.add('call-active');
   $('#incoming').hidden = true;
-  D.paintAvatar($('#call-avatar'), { name: displayName(state.peer), accent: accentOf(state.peer) });
+  D.paintAvatar($('#call-avatar'), { name: displayName(state.peer), accent: accentOf(state.peer), avatar: avatarOf(state.peer) });
   $('#call-peer').textContent = displayName(state.peer);
   $('#call-state').textContent = {
     inviting: 'Calling…',
@@ -2223,6 +2369,8 @@ function wireStaticUi() {
   });
 
   $('#btn-settings').addEventListener('click', openSettings);
+  $('#peer-avatar').addEventListener('click', () => { if (S.activePeer) openPeerProfile(S.activePeer); });
+  $('#peer-name').addEventListener('click', () => { if (S.activePeer) openPeerProfile(S.activePeer); });
   $('#btn-verify').addEventListener('click', openVerify);
   $('#btn-guest').addEventListener('click', async () => {
     const button = $('#btn-guest');

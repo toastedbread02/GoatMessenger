@@ -52,11 +52,20 @@ export function initials(name) {
 // Keep every avatar inside the logo's camel/espresso band.
 const warmHue = (accent) => 22 + (Math.abs(Number(accent) || 0) % 17);
 
-export function paintAvatar(node, { name, accent, online, showPresence }) {
+export function paintAvatar(node, { name, accent, online, showPresence, avatar }) {
   if (!node) return;
   node.style.setProperty('--h', warmHue(accent));
   node.textContent = '';
-  node.append(el('span', { text: initials(name) }));
+  if (avatar) {
+    const img = document.createElement('img');
+    img.className = 'avatar-img';
+    img.src = avatar;
+    img.alt = '';
+    img.draggable = false;
+    node.append(img);
+  } else {
+    node.append(el('span', { text: initials(name) }));
+  }
   if (showPresence) {
     node.append(el('i', { class: `presence${online ? '' : ' off'}` }));
   }

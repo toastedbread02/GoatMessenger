@@ -13,7 +13,7 @@ const { WebSocketServer } = require('ws');
 const { Store } = require('./store');
 const { createTurnServer } = require('./turn');
 
-const MAX_JSON = 512 * 1024;
+const MAX_JSON = 2200 * 1024;
 const MAX_UPLOAD = 50 * 1024 * 1024;
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,24}$/;
 
@@ -64,11 +64,24 @@ const hashToken = (token, salt) => crypto.scryptSync(String(token), salt, 32, { 
 const newToken = () => crypto.randomBytes(32).toString('base64url');
 const safeEqual = (a, b) => a.length === b.length && crypto.timingSafeEqual(a, b);
 
+// Avatar/banner arrive as data URLs and are published to contacts verbatim,
+// so keep them small and strictly image-shaped. null = "not touched".
+const MAX_AVATAR = 220 * 1024;
+const MAX_BANNER = 420 * 1024;
+const IMG_DATA_RE = /^data:image\/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
+function sanitizeImage(input, maxLen) {
+  if (input === undefined) return null;
+  if (typeof input !== 'string') return null;
+  if (input === '') return '';
+  if (input.length > maxLen) return null;
+  return IMG_DATA_RE.test(input) ? input : null;
+}
+
 function sanitizeProfile(input) {
   const displayName = String(input.displayName || '').trim().slice(0, 40);
   const about = String(input.about || '').trim().slice(0, 120);
   const accent = Number.isFinite(input.accent) ? Math.max(0, Math.min(360, Math.round(input.accent))) : null;
-  return { displayName, about, accent };
+  return { displayName, about, accent, avatar: sanitizeImage(input.avatar, MAX_AVATAR), banner: sanitizeImage(input.banner, MAX_BANNER) };
 }
 
 function publicUser(rec, presence) {
@@ -77,6 +90,8 @@ function publicUser(rec, presence) {
     displayName: rec.displayName || rec.username,
     about: rec.about || '',
     accent: rec.accent ?? 0,
+    avatar: rec.avatar || '',
+    banner: rec.banner || '',
     createdAt: rec.createdAt,
     presence: presence(rec.username) ? 'online' : 'offline',
   };
@@ -296,6 +311,8 @@ function createGoatServer({
         if (profile.displayName) me.displayName = profile.displayName;
         if (profile.about !== null) me.about = profile.about;
         if (profile.accent !== null) me.accent = profile.accent;
+        if (profile.avatar !== null) { if (profile.avatar) me.avatar = profile.avatar; else delete me.avatar; }
+        if (profile.banner !== null) { if (profile.banner) me.banner = profile.banner; else delete me.banner; }
         store.putUser(me);
         broadcastToContacts(me.username, {
           t: 'profile', user: publicUser(me, presence),
