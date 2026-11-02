@@ -29,6 +29,7 @@ const S = {
   activePeer: null,
   search: '',
   authMode: 'signin',
+  isGuest: false,
   booted: false,
   mediaCache: new Map(),    // fileId -> object URL
   recorder: null,
@@ -168,6 +169,33 @@ function authError(message) {
   node.hidden = false;
 }
 
+// Guests are throwaway relay accounts the app creates silently. They can chat
+// and make voice calls; camera, screen sharing and file sending need a real
+// account the user has set a passphrase for.
+const GUEST_MSG = 'Please log in or create an account to use this feature.';
+
+function requireLogin() {
+  if (!S.isGuest) return true;
+  toast(GUEST_MSG, 'err');
+  return false;
+}
+
+async function continueAsGuest() {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const name = `guest_${D.randomId(4)}`;
+    const passphrase = D.randomId(16);
+    try {
+      await signUp(name, passphrase, 'Guest');
+      toast('Chatting as a guest — create an account for everything.');
+      return;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) continue; // name taken, roll again
+      throw err;
+    }
+  }
+  throw new Error('Every guest name was taken — try again in a moment.');
+}
+
 function busy(button, label) {
   button.disabled = true;
   button.dataset.label = button.textContent;
@@ -214,6 +242,7 @@ async function signUp(username, passphrase, displayNameValue) {
 
 async function startSession({ username, token, identity, bootstrap, backup }) {
   S.api.setToken(token);
+  S.isGuest = /^guest_/.test(username);
   S.identity = identity;
   if (S.calls) S.calls.identity = identity;
   S.vault = new Vault(username);
@@ -1325,6 +1354,7 @@ window.addEventListener('drop', (event) => {
 });
 
 async function sendFile(file) {
+  if (!requireLogin()) return;
   if (!S.activePeer) return;
   const peer = S.activePeer;
   if (file.size > 40 * 1024 * 1024) {
@@ -1878,6 +1908,7 @@ function buildCallManager() {
     onState: (state) => renderCall(state),
     onIncoming: ({ peer, kind }) => {
       const card = $('#incoming');
+      card.dataset.kind = kind === 'video' ? 'video' : 'audio';
       card.hidden = false;
       D.paintAvatar($('#incoming-avatar'), { name: displayName(peer), accent: accentOf(peer) });
       $('#incoming-name').textContent = displayName(peer);
@@ -2099,6 +2130,7 @@ $('#btn-share').addEventListener('click', () => {
     S.calls.stopShare();
     return;
   }
+  if (!requireLogin()) return;
   openScreenPicker();
 });
 
@@ -2107,6 +2139,7 @@ $('#btn-call-video').addEventListener('click', () => startCall('video'));
 
 async function startCall(kind) {
   if (!S.activePeer) return;
+  if (kind === 'video' && !requireLogin()) return;
   if (S.calls.active) return toast('You are already in a call.', 'err');
   try {
     await S.calls.start(S.activePeer, kind);
@@ -2124,6 +2157,11 @@ async function startCall(kind) {
 }
 
 $('#btn-accept').addEventListener('click', async () => {
+  if ($('#incoming').dataset.kind === 'video' && !requireLogin()) {
+    $('#incoming').hidden = true;
+    S.calls.decline();
+    return;
+  }
   $('#incoming').hidden = true;
   try {
     await S.calls.accept();
@@ -2144,7 +2182,10 @@ $('#btn-decline').addEventListener('click', () => {
 
 $('#btn-hangup').addEventListener('click', () => S.calls.hangup());
 $('#btn-mute').addEventListener('click', () => S.calls.toggleMute());
-$('#btn-camera').addEventListener('click', () => S.calls.toggleCamera());
+$('#btn-camera').addEventListener('click', () => {
+  if (!requireLogin()) return;
+  S.calls.toggleCamera();
+});
 $('#btn-call-code').addEventListener('click', () => {
   const node = $('#call-code');
   node.hidden = !node.hidden;
@@ -2183,6 +2224,18 @@ function wireStaticUi() {
 
   $('#btn-settings').addEventListener('click', openSettings);
   $('#btn-verify').addEventListener('click', openVerify);
+  $('#btn-guest').addEventListener('click', async () => {
+    const button = $('#btn-guest');
+    $('#auth-error').hidden = true;
+    busy(button, 'Waking a guest…');
+    try {
+      await continueAsGuest();
+    } catch (err) {
+      authError(err.message || 'Could not start a guest session.');
+    } finally {
+      unbusy(button);
+    }
+  });
   $('#search').addEventListener('input', (event) => {
     S.search = event.target.value;
     renderChatList();

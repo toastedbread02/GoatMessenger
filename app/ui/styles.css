@@ -201,6 +201,12 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   font-size: 11.5px; color: var(--muted);
 }
 .auth-meta span { font-variant-numeric: tabular-nums; }
+.auth-guest {
+  width: 100%; margin-top: 9px; padding: 11px 16px;
+}
+.auth-guest-hint {
+  margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); text-align: center;
+}
 
 @keyframes rise { from { opacity: 0; transform: translateY(10px) } to { opacity: 1; transform: none } }
 
@@ -886,12 +892,8 @@ body.call-active .toasts { bottom: 128px; }
 
 :root[data-theme="dark"] .auth { background: var(--cream); }
 :root[data-theme="dark"] .auth-panel { background: var(--paper); }
-:root[data-theme="dark"] .auth-art {
-  background: linear-gradient(160deg, #4a3823 0%, #38291a 52%, #2a1e12 100%);
-  color: #f3e6cd;
-}
-:root[data-theme="dark"] .auth-tag,
-:root[data-theme="dark"] .auth-points li { color: #f7ecd6; text-shadow: none; }
+// The login artwork deliberately stays light in dark mode too: dark ink on the
+// camel gradient is the most legible pairing for this panel in both themes.
 :root[data-theme="dark"] .tab { color: var(--ink-3); }
 :root[data-theme="dark"] .tab.is-on { background: #2a2015; color: var(--ink); }
 :root[data-theme="dark"] .field input { background: #17120c; border-color: var(--line); color: var(--ink); }
