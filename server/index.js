@@ -10,11 +10,21 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 const { WebSocketServer } = require('ws');
-const { Store } = require('./store');
-const { createTurnServer } = require('./turn');
+const { Store, openStore } = require('./store');
+// TURN is only needed when the operator opts into UDP relaying, and importing
+// it pulls in `node:dgram` — which would break runtime hosts (Deno Deploy)
+// that have no UDP sockets even when TURN is switched off.
+let createTurnServer = null;
+try { createTurnServer = require('./turn').createTurnServer; } catch (err) {
+  console.error('[relay] TURN support unavailable:', err.message);
+}
 
 const MAX_JSON = 2200 * 1024;
 const MAX_UPLOAD = 50 * 1024 * 1024;
+// On backends where attachments live inside the storage engine (Deno Deploy's
+// KV) uploads are capped tighter so one file can never eat the whole quota's
+// write budget.
+const KV_MAX_UPLOAD = 5 * 1024 * 1024;
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,24}$/;
 
 const bareJson = (res, code, body, headers = {}) => {
@@ -106,9 +116,17 @@ function createGoatServer({
   turn = null,      // { port, publicIp, user, pass, realm, statsToken }
   pow = null,       // 'public' (default) | 'always' | 'off' — signup proof-of-work mode
 } = {}) {
-  const store = new Store(dataDir);
+  const storeReady = openStore(dataDir); // Promise<Store> — fs on Node, Deno KV on Deploy
   const filesDir = path.join(dataDir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
+  // Assigned once the store finishes loading. Every consumer awaits `boot()`
+  // before its first synchronous read; helpers below close over the binding,
+  // so they see the loaded store wherever they run.
+  let store = null;
+  const boot = () => {
+    if (store) return Promise.resolve();
+    return storeReady.then((loaded) => { store = loaded; });
+  };
 
   /* ------------------------------------------------------- hardening headers - */
   // Security headers on every relay response (mostly relevant through the
@@ -268,6 +286,7 @@ function createGoatServer({
   /* ----------------------------------------------------------------- routing - */
 
   async function handleRequest(req, res) {
+    await boot();
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const route = url.pathname;
 
@@ -417,11 +436,11 @@ function createGoatServer({
           for (const ws of wsSet) { try { ws.close(4002, 'account-deleted'); } catch {} }
           sockets.delete(me.username.toLowerCase());
         }
-        const filePaths = store.dropFilesOf(me.username);
-        store.dropRelationsOf(me.username);
-        store.dropMessagesFor(me.username);
-        store.dropSessionsOf(me.username);
-        store.dropUser(me.username);
+        const filePaths = await store.dropFilesOf(me.username);
+        await store.dropRelationsOf(me.username);
+        await store.dropMessagesFor(me.username);
+        await store.dropSessionsOf(me.username);
+        await store.dropUser(me.username);
         store.flush();
         for (const filePath of filePaths) {
           try { fs.unlinkSync(filePath); } catch {}
@@ -503,7 +522,7 @@ function createGoatServer({
         const after = Number(url.searchParams.get('after') || 0);
         if (!store.user(peer)) return fail(res, 404, 'No goat by that name.');
         if (!pairAccepted(me.username, peer)) return fail(res, 403, 'Not connected.');
-        return json(res, 200, { messages: store.messagesBetween(me.username, peer, after) });
+        return json(res, 200, { messages: await store.messagesBetween(me.username, peer, after) });
       }
 
       // Group chats. Membership is plain server state; content is still
@@ -575,20 +594,25 @@ function createGoatServer({
       }
 
       if (route === '/api/upload' && req.method === 'POST') {
-        const buf = await readBody(req, MAX_UPLOAD);
+        const limit = store.mode === 'kv' ? KV_MAX_UPLOAD : MAX_UPLOAD;
+        const buf = await readBody(req, limit);
         if (!buf.length) return fail(res, 400, 'Empty file.');
         const id = crypto.randomBytes(16).toString('hex');
-        const target = path.join(filesDir, `${id}.bin`);
-        fs.writeFileSync(target, buf);
         const rec = {
           id,
           owner: me.username.toLowerCase(),
           name: String(req.headers['x-file-name'] || 'file').slice(0, 120),
           mime: String(req.headers['x-file-type'] || 'application/octet-stream').slice(0, 100),
           size: buf.length,
-          path: target,
           ts: Date.now(),
         };
+        if (store.mode === 'kv') {
+          await store.putBlob(id, buf); // attachments live in the storage engine
+        } else {
+          const target = path.join(filesDir, `${id}.bin`);
+          fs.writeFileSync(target, buf);
+          rec.path = target;
+        }
         store.addFile(rec);
         return json(res, 200, { id, size: rec.size });
       }
@@ -601,15 +625,21 @@ function createGoatServer({
           || pairAccepted(me.username, owner)
           || store.shareGroup(me.username, owner);
         if (!allowed) return fail(res, 403, 'Not allowed.');
-        if (!fs.existsSync(rec.path)) return fail(res, 410, 'File expired.');
-        res.writeHead(200, {
+        const fileHeaders = {
           'Content-Type': 'application/octet-stream',
-          'Content-Length': rec.size,
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
           'Access-Control-Allow-Origin': '*',
-        });
+        };
+        if (store.mode === 'kv') {
+          const bytes = await store.getBlob(rec.id);
+          if (!bytes) return fail(res, 410, 'File expired.');
+          res.writeHead(200, { ...fileHeaders, 'Content-Length': bytes.length });
+          return res.end(bytes);
+        }
+        if (!fs.existsSync(rec.path)) return fail(res, 410, 'File expired.');
+        res.writeHead(200, { ...fileHeaders, 'Content-Length': rec.size });
         return fs.createReadStream(rec.path).pipe(res);
       }
 
@@ -646,7 +676,8 @@ function createGoatServer({
   });
   const calls = new Map(); // callId -> { from, to, kind, startedAt }
 
-  wss.on('connection', (ws, req) => {
+  wss.on('connection', async (ws, req) => {
+    await boot();
     const url = new URL(req.url, 'http://localhost');
     const token = url.searchParams.get('token') || '';
     const session = store.session(token);
@@ -784,12 +815,16 @@ function createGoatServer({
     for (const ws of wss.clients) ws.terminate();
     wss.close();
     server.close(() => {
-      store.close();
-      resolve();
+      // KV-backed stores flush their last writes asynchronously; resolve once
+      // that settles (or soon after — shutdown budgets are tight).
+      const done = Promise.resolve(store && store.close()).catch(() => {});
+      done.then(resolve);
+      const late = setTimeout(resolve, 4000);
+      if (late.unref) late.unref();
     });
   });
 
-  const listen = () => new Promise((resolve, reject) => {
+  const listen = () => boot().then(() => new Promise((resolve, reject) => {
     const onError = (err) => {
       server.off('error', onError);
       // Stop spinning the TURN listener on a relay level bind failure or a
@@ -814,7 +849,7 @@ function createGoatServer({
       }
       resolve(server.address().port);
     });
-  });
+  }));
 
   return {
     server, wss, store, listen, close, presence, dataDir, tls: Boolean(tls), host,
@@ -826,8 +861,11 @@ function createGoatServer({
 module.exports = { createGoatServer };
 
 if (require.main === module) {
-  const port = Number(process.env.PORT || 4040);
-  const host = process.env.HOST || '127.0.0.1';
+  const isDeno = typeof Deno !== 'undefined';
+  // Deno Deploy fronts external HTTPS traffic; the listener must bind the
+  // wildcard address and can pick its own port.
+  const port = Number(process.env.PORT || (isDeno ? 8787 : 4040));
+  const host = process.env.HOST || (isDeno ? '0.0.0.0' : '127.0.0.1');
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
   let tls = null;
   if (process.env.TLS_CERT && process.env.TLS_KEY) {

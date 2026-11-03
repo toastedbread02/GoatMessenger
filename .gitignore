@@ -14,3 +14,4 @@ mnt/
 *.log
 npm-debug.log*
 .DS_Store
+.deno/

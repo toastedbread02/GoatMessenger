@@ -1,0 +1,11 @@
+{
+  "nodeModulesDir": "manual",
+  "unstable": ["kv"],
+  "deploy": {
+    "install": "npm install --omit=dev",
+    "build": "",
+    "runtime": {
+      "entrypoint": "server/index.js"
+    }
+  }
+}
