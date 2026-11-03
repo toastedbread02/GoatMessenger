@@ -4,6 +4,9 @@ dist-installer/
 build/dmg-stage/
 build/goat-codesign.key
 build/goat-codesign.crt
+build/goat-codesign.p12
+_scratch/
+updated.png
 build/*.dmg
 build/photos/
 data/
