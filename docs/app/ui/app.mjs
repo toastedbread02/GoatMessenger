@@ -2661,7 +2661,12 @@ async function boot() {
   const lastUser = localStorage.getItem('gm:lastUser');
   if (lastUser) $('#auth-username').value = lastUser;
 
-  const healthy = await fetch(`${S.info.relayUrl}/api/health`).then((r) => r.ok).catch(() => false);
+  // The ngrok-skip header matters on free tunnels: without it ngrok answers
+  // the browser with its interstitial page and boot would always think the
+  // relay is down, even when it is fine.
+  const healthy = await fetch(`${S.info.relayUrl}/api/health`, {
+    headers: { 'ngrok-skip-browser-warning': 'goatmessenger' },
+  }).then((r) => r.ok).catch(() => false);
   showBootNote(healthy ? 'Ready.' : 'Relay not reachable — start it with npm run server.');
   if (!healthy) showRelayWarning(S.info.relayError || `No relay answering at ${S.info.relayUrl}.`);
 
