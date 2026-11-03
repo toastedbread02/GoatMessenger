@@ -1,8 +1,9 @@
 // HTTP + WebSocket client for the relay.
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, data) {
     super(message);
     this.status = status || 0;
+    this.data = data || null;
   }
 }
 
@@ -52,7 +53,7 @@ export class Api {
     }
     let data = {};
     try { data = await res.json(); } catch { /* empty body */ }
-    if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
+    if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, res.status, data);
     return data;
   }
 

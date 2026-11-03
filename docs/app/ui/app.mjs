@@ -239,15 +239,47 @@ async function signUp(username, passphrase, displayNameValue) {
   const keys = C.derivePassphraseKeys(passphrase, name);
   const identity = C.createIdentity();
   const backup = await C.wrapIdentity(C.exportIdentity(identity), keys.wrapKey);
-  const res = await S.api.signup({
+  const buildPayload = (pow) => ({
     username: name,
     displayName: (displayNameValue || name).trim(),
     authToken: keys.authToken,
     identityBackup: backup,
     keys: C.publicBundle(identity),
+    ...(pow ? { pow } : {}),
   });
+  let res;
+  try {
+    res = await S.api.signup(buildPayload());
+  } catch (err) {
+    // Public relays demand a tiny proof of work to keep bots out. The
+    // challenge arrives with the 428 — solve and retry exactly once.
+    if (err instanceof ApiError && err.status === 428 && err.data?.challenge) {
+      const pow = { challenge: err.data.challenge, nonce: await solveProofOfWork(err.data.bits || 16, err.data.challenge, name) };
+      res = await S.api.signup(buildPayload(pow));
+    } else {
+      throw err;
+    }
+  }
   await startSession({ username: res.me.username, token: res.token, identity, bootstrap: res, backup });
   return res;
+}
+
+// SHA-256 proof of work: find a nonce whose digest has `bits` leading zeros.
+// crypto.subtle is native; the occasional yield keeps the UI alive while the
+// loop grinds (~65k hashes at the default 16 bits, a second or two).
+async function solveProofOfWork(bits, challenge, name) {
+  const enc = new TextEncoder();
+  for (let n = 0; ; n++) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(`${challenge}:${name}:${String(n)}`)));
+    let left = bits;
+    for (const byte of digest) {
+      if (byte === 0) { left -= 8; continue; }
+      for (let m = 0x80; m > 0; m >>= 1) { if (byte & m) break; left--; }
+      break;
+    }
+    if (left <= 0) return String(n);
+    if (n % 256 === 0) await new Promise((r) => setTimeout(r));
+  }
 }
 
 async function startSession({ username, token, identity, bootstrap, backup }) {

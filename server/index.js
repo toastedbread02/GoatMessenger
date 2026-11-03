@@ -17,7 +17,7 @@ const MAX_JSON = 2200 * 1024;
 const MAX_UPLOAD = 50 * 1024 * 1024;
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,24}$/;
 
-const json = (res, code, body) => {
+const bareJson = (res, code, body, headers = {}) => {
   const payload = JSON.stringify(body);
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -26,11 +26,12 @@ const json = (res, code, body) => {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'authorization,content-type,x-file-name,x-file-type,ngrok-skip-browser-warning',
     'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+    ...headers,
   });
   res.end(payload);
 };
 
-const fail = (res, code, error, extra) => json(res, code, { error, ...(extra || {}) });
+const fail = (res, code, error, extra) => bareJson(res, code, { error, ...(extra || {}) });
 
 function readBody(req, limit) {
   return new Promise((resolve, reject) => {
@@ -103,10 +104,74 @@ function createGoatServer({
   host = '127.0.0.1',
   tls = null,
   turn = null,      // { port, publicIp, user, pass, realm, statsToken }
+  pow = null,       // 'public' (default) | 'always' | 'off' — signup proof-of-work mode
 } = {}) {
   const store = new Store(dataDir);
   const filesDir = path.join(dataDir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
+
+  /* ------------------------------------------------------- hardening headers - */
+  // Security headers on every relay response (mostly relevant through the
+  // browser copy of the app). Strict-Transport-Security only exists on TLS.
+  const baseHeaders = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    ...(tls ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
+  };
+  // Shadow the module-level helpers so every response inside this server
+  // carries the hardening headers too.
+  const json = (res, code, body, headers = {}) => bareJson(res, code, body, { ...baseHeaders, ...headers });
+  const fail = (res, code, error, extra) => json(res, code, { error, ...(extra || {}) });
+  const sendJson = json;
+
+  /* ------------------------------------------------------------ bot control - */
+  // Light proof-of-work on signups for relays reachable from the open
+  // internet (tunnels/VPS). Loopback (the embedded relay in the desktop app
+  // and local dev/tests) is exempt unless pow: 'always' is set.
+  const POW_BITS = 16;
+  const POW_MODE = pow === 'off' ? 'off' : (pow === 'always' ? 'always' : 'public');
+  const POW_SECRET = crypto.randomBytes(32); // per-process: challenges die with the relay, do not need to persist
+  const powSeen = new Set();
+  const ipOf = (req) => String((req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
+  const isLoopbackIp = (ip) => ip.startsWith('127.') || ip === '::1' || ip === 'localhost';
+  const powChallenge = (ip, name, bucket = Math.floor(Date.now() / 3600000)) =>
+    crypto.createHmac('sha256', POW_SECRET).update(`${bucket}:${ip}:${name}`).digest('hex');
+  const leadingZeroBits = (buf) => {
+    let bits = 0;
+    for (const byte of buf) {
+      if (byte === 0) { bits += 8; continue; }
+      for (let m = 0x80; m > 0; m >>= 1) { if (byte & m) break; bits++; }
+      break;
+    }
+    return bits;
+  };
+
+  /** Verifies a signup's proof of work — null when valid, else { error, bits, challenge }. */
+  const powVerify = (ip, name, pow) => {
+    const now = Math.floor(Date.now() / 3600000);
+    const accepted = new Set([powChallenge(ip, name, now), powChallenge(ip, name, now - 1)]);
+    if (!pow || typeof pow !== 'object' || typeof pow.challenge !== 'string' || !accepted.has(pow.challenge)) {
+      return { error: 'Signup proof of work is stale. Try again.', bits: POW_BITS, challenge: powChallenge(ip, name, now) };
+    }
+    const nonce = String(pow.nonce || '');
+    if (!/^\d{1,10}$/.test(nonce)) {
+      return { error: 'Signup proof of work is malformed.', bits: POW_BITS, challenge: pow.challenge };
+    }
+    const digest = crypto.createHash('sha256').update(`${pow.challenge}:${name}:${nonce}`).digest();
+    const key = `${pow.challenge}:${nonce}`;
+    const spent = powSeen.has(key);
+    if (!spent && leadingZeroBits(digest) < POW_BITS) {
+      return { error: 'Signup proof of work did not check out.', bits: POW_BITS, challenge: pow.challenge };
+    }
+    if (spent) {
+      return { error: 'Signup proof of work has been used already.', bits: POW_BITS, challenge: powChallenge(ip, name, now) };
+    }
+    if (powSeen.size > 40000) powSeen.clear();
+    powSeen.add(key);
+    return null;
+  };
+  const powRequired = (ip) => POW_MODE === 'always' || (POW_MODE === 'public' && !isLoopbackIp(ip));
 
   /** username -> Set<WebSocket> */
   const sockets = new Map();
@@ -216,6 +281,13 @@ function createGoatServer({
         });
       }
 
+      // Proof-of-work challenge for signups (see powVerify below). Supply the
+      // intended username so the challenge binds to it.
+      if (route === '/api/pow' && req.method === 'GET') {
+        const name = String(url.searchParams.get('name') || '');
+        return json(res, 200, { bits: POW_BITS, challenge: powChallenge(ipOf(req), name) });
+      }
+
       // Local operational read-out for the bundled TURN relay. Guarded by a
       // token so a public deployment does not advertise its traffic counters.
       if (route === '/api/turn-stats') {
@@ -231,6 +303,12 @@ function createGoatServer({
         const body = await readJson(req);
         const username = String(body.username || '').trim();
         if (!USERNAME_RE.test(username)) return fail(res, 400, 'Use 3–24 letters, numbers or underscores.');
+        if (powRequired(ip)) {
+          // Bots hit public relays hard first; a tiny proof of work keeps
+          // mass registrations out without any third-party captcha.
+          const verdict = powVerify(ip, username, body.pow);
+          if (verdict) return sendJson(res, 428, { ...verdict });
+        }
         if (store.user(username)) return fail(res, 409, 'That name is already taken.');
         if (typeof body.authToken !== 'string' || body.authToken.length < 32) return fail(res, 400, 'Weak auth token.');
         const keys = body.keys || {};
@@ -462,6 +540,8 @@ function createGoatServer({
           'Content-Type': 'application/octet-stream',
           'Content-Length': rec.size,
           'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
           'Access-Control-Allow-Origin': '*',
         });
         return fs.createReadStream(rec.path).pipe(res);

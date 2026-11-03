@@ -5,6 +5,7 @@ build/dmg-stage/
 build/goat-codesign.key
 build/goat-codesign.crt
 build/*.dmg
+build/photos/
 data/
 mnt/
 *.log

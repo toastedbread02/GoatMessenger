@@ -3,6 +3,7 @@ const assert = require('assert');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const WebSocket = require('ws');
 
 (async () => {
@@ -300,6 +301,66 @@ const WebSocket = require('ws');
     assert.ok(blob.status === 404 || blob.status === 410, 'uploaded file record is gone');
     daveWs.close();
     aliceWs.close();
+  });
+
+  await check('hardening headers ride on every response', async () => {
+    const res = await fetch(`${base}/api/health`);
+    assert.strictEqual(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.strictEqual(res.headers.get('x-frame-options'), 'DENY');
+    assert.strictEqual(res.headers.get('referrer-policy'), 'no-referrer');
+  });
+
+  await check('bot protection: public signup demands a proof of work', async () => {
+    const powDir = fs.mkdtempSync(path.join(os.tmpdir(), 'goatmessenger-pow-'));
+    const powGoat = createGoatServer({ port: 0, dataDir: powDir, host: '127.0.0.1', pow: 'always' });
+    const powPort = await powGoat.listen();
+    try {
+      const ident = C.createIdentity();
+      const keys = C.derivePassphraseKeys('passphrase-PowBot', 'PowBot');
+      const backup = await C.wrapIdentity(C.exportIdentity(ident), keys.wrapKey);
+      const payload = (pow) => JSON.stringify({
+        username: 'PowBot', displayName: 'PowBot', authToken: keys.authToken,
+        identityBackup: backup, keys: C.publicBundle(ident), accent: 10, ...(pow ? { pow } : {}),
+      });
+      const post = (body) => fetch(`http://127.0.0.1:${powPort}/api/signup`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body,
+      });
+
+      // no proof -> 428 with a challenge and bit target
+      const denied = await post(payload(null));
+      const challengeBody = await denied.json();
+      assert.strictEqual(denied.status, 428, JSON.stringify(challengeBody));
+      assert.ok(challengeBody.challenge && challengeBody.bits >= 8);
+
+      const solve = (bits, challenge) => {
+        for (let n = 0; ; n++) {
+          const digest = crypto.createHash('sha256').update(`${challenge}:${'PowBot'}:${n}`).digest();
+          let left = bits;
+          for (const byte of digest) {
+            if (byte === 0) { left -= 8; continue; }
+            for (let m = 0x80; m > 0; m >>= 1) { if (byte & m) break; left--; }
+            break;
+          }
+          if (left <= 0) return String(n);
+        }
+      };
+
+      // tampered proof stays locked out
+      const tampered = await post(payload({ challenge: challengeBody.challenge, nonce: '0' }));
+      assert.strictEqual(tampered.status, 428);
+
+      // a real solution registers the account
+      const good = await post(payload({ challenge: challengeBody.challenge, nonce: solve(challengeBody.bits, challengeBody.challenge) }));
+      assert.strictEqual(good.status, 200, JSON.stringify(await good.json()));
+
+      // replaying the winning nonce is refused (it is spent)
+      const replay = await post(payload({ challenge: challengeBody.challenge, nonce: solve(challengeBody.bits, challengeBody.challenge) }));
+      assert.strictEqual(replay.status, 428);
+
+      await powGoat.close();
+    } finally {
+      fs.rmSync(powDir, { recursive: true, force: true });
+    }
   });
 
   await check('persistence survives a restart', async () => {
