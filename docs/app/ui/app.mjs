@@ -1651,7 +1651,8 @@ $('#btn-new-group').addEventListener('click', openCreateGroup);
 // New group: name it, tick the goats (any connected contacts), invite them.
 // The relay stores plain membership; every message is still sealed per member.
 function openCreateGroup() {
-  if (!requireLogin()) return;
+  // Groups are regular chats, so guests may have them too — only screens,
+  // camera and files stay account-only.
   const nameInput = el('input', {
     placeholder: 'The stable', maxlength: '60', spellcheck: 'true',
     'aria-label': 'Group name',
