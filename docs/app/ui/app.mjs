@@ -1061,10 +1061,19 @@ function buildVoice(rec) {
     btn.append(icon('play'));
   });
   audio.addEventListener('timeupdate', () => {
-    const total = audio.duration || rec.payload.duration || 1;
+    // Chrome reports Infinity for MediaRecorder WebM blobs — that must not win
+    // over the duration stamped into the payload at record time.
+    const total = Number.isFinite(audio.duration) && audio.duration > 0
+      ? audio.duration
+      : (Number(rec.payload.duration) > 0 ? rec.payload.duration : (audio.currentTime || 1));
     const progress = audio.currentTime / total;
     Array.from(bars.children).forEach((bar, i) => bar.classList.toggle('on', i / bars.children.length <= progress));
     time.textContent = D.duration(Math.max(0, total - audio.currentTime));
+  });
+  audio.addEventListener('loadedmetadata', () => {
+    time.textContent = D.duration(Number.isFinite(audio.duration) && audio.duration > 0
+      ? audio.duration
+      : Number(rec.payload.duration) > 0 ? rec.payload.duration : 0);
   });
   audio.addEventListener('ended', () => {
     time.textContent = D.duration(rec.payload.duration || 0);
