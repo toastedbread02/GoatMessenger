@@ -126,6 +126,7 @@ function syncBadge() {
 
 function openModal(content, { onClose } = {}) {
   const layer = $('#modal-layer');
+  S.settingsGuard = null; // the old modal is gone; a fresh one re-arms below
   layer.innerHTML = '';
   layer.append(content);
   layer.hidden = false;
@@ -134,9 +135,17 @@ function openModal(content, { onClose } = {}) {
   return layer;
 }
 
-function closeModal() {
+function closeModal(force = false) {
   const layer = $('#modal-layer');
   if (layer.hidden) return;
+  // Settings refuses to close while its draft has unsaved edits — the warning
+  // bar inside the settings modal offers the Save that unlocks it.
+  if (!force && S.settingsGuard?.isDirty?.()) {
+    S.settingsGuard.refuse();
+    return;
+  }
+  S.settingsGuard = null;
+  if (force || S.profileDraft) S.profileDraft = null;
   layer.hidden = true;
   layer.innerHTML = '';
   const cb = layer._onClose;
@@ -1824,8 +1833,54 @@ function themePicker() {
   return el('div', { class: 'field' }, el('span', { text: 'Theme' }), seg);
 }
 
-function profilePane() {
-  const draft = {
+// Saves whatever is currently in the settings draft, wherever the user is in
+// Settings — the warning bar on top of the modal (and the pane's own Save
+// button) both funnel here, so a draft can always be saved and then closed.
+async function saveProfileDraft(ctl) {
+  if (!S.profileDraft) return;
+  if (!requireLogin()) return;
+  const draft = S.profileDraft;
+  const dirtyBar = ctl?.bar;
+  try {
+    if (dirtyBar) busy(dirtyBar.querySelector('button'), 'Saving…');
+    const res = await S.api.updateProfile({
+      displayName: draft.displayName,
+      about: draft.about,
+      avatar: draft.avatar,
+      banner: draft.banner,
+    });
+    S.me = { ...S.me, ...res.me };
+    S.profileDraft = {
+      displayName: S.me.displayName || '',
+      about: S.me.about || '',
+      accent: S.me.accent,
+      avatar: S.me.avatar || '',
+      banner: S.me.banner || '',
+    };
+    renderMe();
+    renderChatList();
+    toast('Profile saved.');
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    if (dirtyBar) unbusy(dirtyBar.querySelector('button'));
+    ctl?.update();
+  }
+}
+
+function profileDirty() {
+  const d = S.profileDraft;
+  if (!d) return false;
+  return d.displayName !== (S.me.displayName || '')
+    || (d.about || '').trim() !== (S.me.about || '').trim()
+    || d.avatar !== (S.me.avatar || '')
+    || d.banner !== (S.me.banner || '');
+}
+
+function profilePane(ctl) {
+  // The draft survives Settings category switches (and a blocked close) so
+  // unsaved edits are never silently dropped; it resets once settings closes.
+  const draft = S.profileDraft ??= {
     displayName: S.me.displayName || '',
     about: S.me.about || '',
     accent: S.me.accent,
@@ -1860,6 +1915,7 @@ function profilePane() {
       draft.avatar = await readImageThumb(file, { w: 256, h: 256, quality: 0.86 });
       paintPickers();
       renderPreview();
+      ctl?.update();
     } catch (err) { toast(err.message, 'err'); }
   };
   const setBanner = async () => {
@@ -1869,12 +1925,13 @@ function profilePane() {
       draft.banner = await readImageThumb(file, { w: 960, h: 320, quality: 0.82 });
       paintPickers();
       renderPreview();
+      ctl?.update();
     } catch (err) { toast(err.message, 'err'); }
   };
   avatarBox.addEventListener('click', () => { if (requireLogin()) setAvatar(); });
   bannerBox.addEventListener('click', () => { if (requireLogin()) setBanner(); });
-  const removeAvatar = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { if (!requireLogin() || !draft.avatar) return; draft.avatar = ''; paintPickers(); renderPreview(); } });
-  const removeBanner = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { if (!requireLogin() || !draft.banner) return; draft.banner = ''; paintPickers(); renderPreview(); } });
+  const removeAvatar = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { if (!requireLogin() || !draft.avatar) return; draft.avatar = ''; paintPickers(); renderPreview(); ctl?.update(); } });
+  const removeBanner = el('button', { class: 'mini quiet pick-clear', type: 'button', text: 'Remove', onclick: () => { if (!requireLogin() || !draft.banner) return; draft.banner = ''; paintPickers(); renderPreview(); ctl?.update(); } });
 
   const nameInput = el('input', { value: draft.displayName, maxlength: '40', placeholder: S.me.username });
   const aboutInput = el('input', { value: draft.about, placeholder: 'a goat of few words', maxlength: '120' });
@@ -1882,8 +1939,8 @@ function profilePane() {
     ? el('small', { class: 'net-hint', text: 'Guests keep a basic profile. Log in or create an account to edit photos, banner or name.' })
     : null;
   if (S.isGuest) { nameInput.disabled = true; aboutInput.disabled = true; }
-  nameInput.addEventListener('input', () => { draft.displayName = nameInput.value.trim() || S.me.username; renderPreview(); });
-  aboutInput.addEventListener('input', () => { draft.about = aboutInput.value.trim(); renderPreview(); });
+  nameInput.addEventListener('input', () => { draft.displayName = nameInput.value.trim() || S.me.username; renderPreview(); ctl?.update(); });
+  aboutInput.addEventListener('input', () => { draft.about = aboutInput.value.trim(); renderPreview(); ctl?.update(); });
 
   return el('div', {},
     el('small', { class: 'net-hint', text: 'This is the profile card other goats see — live preview:' }),
@@ -1899,21 +1956,7 @@ function profilePane() {
       el('button', {
         class: 'primary small',
         text: 'Save profile',
-        onclick: async () => {
-          if (!requireLogin()) return;
-          try {
-            const res = await S.api.updateProfile({
-              displayName: nameInput.value.trim() || S.me.username,
-              about: aboutInput.value.trim(),
-              avatar: draft.avatar,
-              banner: draft.banner,
-            });
-            S.me = { ...S.me, ...res.me };
-            renderMe();
-            renderChatList();
-            toast('Profile saved.');
-          } catch (err) { toast(err.message, 'err'); }
-        },
+        onclick: () => saveProfileDraft(ctl),
       })),
     el('div', { class: 'row-item' },
       el('div', { class: 'grow' }, el('div', { text: 'Relay' }), el('small', { text: S.api.url || 'not connected' })),
@@ -2040,6 +2083,23 @@ function openSettings(category = S.settingsCat || 'profile') {
   if (!panes[category]) category = 'profile';
   S.settingsCat = category;
 
+  // Unsaved-edits warning bar: shown while the profile draft differs from the
+  // saved profile, with a Save that unblocks closing.
+  const dirtyBar = el('div', { class: 'settings-dirty-bar', hidden: true },
+    el('span', { class: 'dirty-text', text: 'You have unsaved changes' }),
+    el('button', { class: 'primary small', text: 'Save', onclick: () => ctl.save() }));
+  let ctl = {
+    bar: dirtyBar,
+    update: () => { dirtyBar.hidden = !profileDirty(); },
+    flash: () => {
+      dirtyBar.hidden = false;
+      dirtyBar.classList.remove('shake');
+      void dirtyBar.offsetWidth;
+      dirtyBar.classList.add('shake');
+    },
+    save: () => saveProfileDraft(ctl),
+  };
+
   const labels = {
     profile: ['Profile', 'users'],
     appearance: ['Appearance', 'smile'],
@@ -2058,16 +2118,22 @@ function openSettings(category = S.settingsCat || 'profile') {
     }, icon(ic), el('span', { text: label })));
   }
 
-  const content = el('div', { class: 'settings-body' }, panes[category]());
+  const content = el('div', { class: 'settings-body' }, panes[category](ctl));
   const modal = el('div', { class: 'modal settings-modal' },
     el('h3', { text: 'Settings' }),
     el('p', { class: 'sub', text: `@${S.me.username}` }),
-    el('div', { class: 'settings-grid' }, side, content));
+    el('div', { class: 'settings-grid' }, side, content),
+    dirtyBar);
   openModal(modal);
+  ctl.update();
+  S.settingsGuard = {
+    isDirty: () => profileDirty(),
+    refuse: () => ctl.flash(),
+  };
 }
 
 async function signOut() {
-  closeModal();
+  closeModal(true); // signing out is explicit: a dirty settings draft does not block it
   try { await window.goat?.session?.clear?.(); } catch {}
   try { await S.api.logout(); } catch {}
   S.api.close();
