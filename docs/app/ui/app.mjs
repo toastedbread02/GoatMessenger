@@ -1565,18 +1565,9 @@ function openAddContact() {
       if (foundBadge) foundName.append(foundBadge);
       row.append(avatar, foundName,
         el('span', { class: 'chip', text: found.state === 'accepted' ? 'connected' : found.state === 'in' ? 'wants you' : found.user.presence }));
-      row.addEventListener('click', async () => {
-        try {
-          if (found.isSelf) return toast('That is you, silly goat.');
-          if (found.state === 'accepted') { closeModal(); await openChat(found.user.username); return; }
-          if (found.state === 'in') await acceptRequest(found.user.username);
-          else if (found.state === 'out') return toast('Request already sent.');
-          else {
-            applyBootstrap(await S.api.addContact(found.user.username));
-            toast(`Request sent to ${found.user.displayName}.`);
-          }
-          closeModal();
-        } catch (err) { toast(err.message, 'err'); }
+      row.addEventListener('click', () => {
+        if (found.isSelf) return toast('That is you, silly goat.');
+        openUserProfile(found);
       });
       results.append(row);
     } catch (err) {
@@ -1641,6 +1632,37 @@ function openPeerProfile(peer) {
     card,
     rec.state === 'accepted' ? el('span', { class: 'chip', text: 'connected · end-to-end encrypted' }) : null);
   openModal(modal);
+}
+
+// From the add-contact flow: tapping a found goat shows their profile card,
+// with the action that matches the current contact state (chat / accept / send).
+function openUserProfile(found) {
+  const user = found.user || {};
+  const key = String(user.username || '').toLowerCase();
+  const card = profileCard(user);
+  let action;
+  if (found.state === 'accepted') {
+    action = el('button', { class: 'primary small', type: 'button', text: 'Open chat', onclick: async () => {
+      closeModal();
+      try { await openChat(key); } catch (err) { toast(err.message, 'err'); }
+    } });
+  } else if (found.state === 'in') {
+    action = el('button', { class: 'primary small', type: 'button', text: 'Accept request', onclick: async () => {
+      closeModal();
+      await acceptRequest(key);
+    } });
+  } else if (found.state === 'out') {
+    action = el('span', { class: 'chip', text: 'request sent · waiting' });
+  } else {
+    action = el('button', { class: 'primary small', type: 'button', text: 'Send contact request', onclick: async () => {
+      try {
+        applyBootstrap(await S.api.addContact(key));
+        toast(`Request sent to ${user.displayName || key}.`);
+        closeModal();
+      } catch (err) { toast(err.message, 'err'); }
+    } });
+  }
+  openModal(modalShell(user.displayName ? `@${user.username}` : 'Profile', null, card, [action]));
 }
 
 // Center-crop an image file to a fixed square/rect Data URL (JPEG).
