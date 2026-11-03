@@ -1,0 +1,28 @@
+# Free relay in the cloud, no credit card and no home address: Render's free
+# web-service tier, signed in with GitHub only.
+#
+#   Render → New → Blueprint → pick this repo → Apply
+#
+# Two things to know before trusting it with a real herd:
+#   • Free services sleep after 15 minutes without traffic (first request then
+#     takes ~1 minute to wake). Ping /api/health every 10 minutes from a free
+#     uptime monitor to keep it warm.
+#   • Free services have an ephemeral disk: accounts, ratchets and attachments
+#     are lost whenever the instance restarts or is redeployed.
+#
+# For durable free hosting, run the relay on Deno Deploy or Cloudflare Workers
+# instead — README → "Hosting the relay in the cloud".
+services:
+  - type: web
+    name: goatmessenger-relay
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --omit=dev --ignore-scripts
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_VERSION
+        value: "22"

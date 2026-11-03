@@ -4,7 +4,10 @@
 import { idb } from './idb.mjs';
 import { serializeSession, deserializeSession } from '../shared/crypto.mjs';
 
-const MAX_HISTORY = 1500;
+// Per-chat cap. Every message is a small JSON record, but a long-lived pair of
+// chatty goats can reach thousands of them, and history is rewritten whole on
+// each save — 400 keeps writes small and the storage pane's "keep" honest.
+export const MAX_HISTORY = 400;
 
 export class Vault {
   constructor(username) {
@@ -84,6 +87,33 @@ export class Vault {
     p[key] = value;
     await idb.set(this.k('prefs'), p);
     return p;
+  }
+
+  /* storage accounting ----------------------------------------------------- */
+  async historyStats() {
+    const keys = await idb.keys(this.k('msgs'));
+    let notes = 0;
+    let bytes = 0;
+    for (const key of keys) {
+      const list = await idb.get(key, []);
+      notes += list.length;
+      for (const rec of list) bytes += JSON.stringify(rec).length;
+    }
+    return { chats: keys.length, notes, bytes };
+  }
+
+  // Trim every chat down to its newest `keep` notes. Returns how many went.
+  async trimHistory(keep = MAX_HISTORY) {
+    const keys = await idb.keys(this.k('msgs'));
+    let removed = 0;
+    for (const key of keys) {
+      const list = await idb.get(key, []);
+      if (list.length <= keep) continue;
+      removed += list.length - keep;
+      await idb.set(key, list.slice(list.length - keep));
+    }
+    this.msgCache.clear();
+    return removed;
   }
 
   async wipeHistory() {

@@ -24,8 +24,12 @@ repo: espresso line-work on camel, cream paper, warm serif headings.
   can measure your call, but it can never listen to it.
 - **Safety numbers** — a 60-digit fingerprint per conversation that you can read aloud and
   mark as verified.
+- **Voice notes with transcripts** — a note is transcribed while you record it (speech-to-text
+  runs on your machine), and the transcript rides inside the same encrypted payload, so the
+  relay never sees the words either. Received notes can be transcribed on demand.
 - **The rest of a messenger** — presence, typing indicators, read receipts, unread badges,
-  day dividers, chat + message search, profile editing, encrypted history on disk.
+  day dividers, chat + message search, profile editing, encrypted history on disk, plus a
+  Storage pane that caps history per chat and frees cached previews.
 
 ![Conversation](screenshots/03-conversation.png)
 
@@ -119,6 +123,28 @@ the terminal). That URL goes into **Settings → Network** on every device that 
 share that relay.
 The app sends ngrok's `ngrok-skip-browser-warning` header automatically, so free tunnels
 work without their "Visit site" interstitial breaking the health checks.
+
+### Hosting the relay in the cloud
+
+No free hosting asks for zero information at all — but two options come close, and neither
+wants a credit card, a phone number or a home address.
+
+**Render (free, cardless, works with this repo unchanged).** `render.yaml` in this repo is a
+blueprint for the relay: Render → **New → Blueprint** → pick this repo → **Apply**, signing in
+with GitHub. You get a `https://goatmessenger-relay.onrender.com` URL — paste it into
+**Settings → Network** (or launch with `GM_SERVER=`). The catch is printed at the top of
+`render.yaml`: the free instance sleeps after 15 quiet minutes and its disk is wiped on every
+restart, so it is fine for trying things out, not for a long-lived herd.
+
+**Deno Deploy (free, cardless, durable).** Signing in with GitHub is the whole signup, storage
+is Deno KV, and WebSocket traffic keeps the deployment awake. It cannot run `server/index.js`
+as-is (no filesystem, no Node `ws`), so the relay needs a port to `Deno.serve` +
+`Deno.upgradeWebSocket` before it can go there. Ask and it gets done.
+
+What does **not** work for free: Oracle Cloud's Always Free ARM VM and Google Cloud's e2-micro
+are genuinely free forever and always on, but both require a card (Oracle also a phone
+number) at signup, and Koyeb/Fly.io/Railway either want a card or sleep/expire on the free
+plan.
 
 ## How the encryption works
 

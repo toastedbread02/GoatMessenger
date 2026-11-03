@@ -2,7 +2,7 @@
 import * as C from '../shared/crypto.mjs';
 import { isVerified, VERIFIED_TIP } from '../shared/verified.mjs';
 import { Api, ApiError } from './api.mjs';
-import { Vault } from './vault.mjs';
+import { Vault, MAX_HISTORY } from './vault.mjs';
 import { CallManager } from './calls.mjs';
 import { Sound } from './sound.mjs';
 import * as D from './dom.mjs';
@@ -36,6 +36,7 @@ const S = {
   mediaCache: new Map(),    // fileId -> object URL
   recorder: null,
   recordingTimer: null,
+  transcriptDraft: '',       // live speech-to-text while a voice note records
   droppedEnvelopes: 0,
   themeMode: 'system',
   settingsCat: 'profile',
@@ -639,11 +640,18 @@ async function sendGroupPayload(peer, kind, payload) {
   return record;
 }
 
+// Keep the in-memory copy bounded too — the store and RAM should agree, or a
+// long-lived chat drags every old note around until the window is closed.
+function capList(list) {
+  if (list.length > MAX_HISTORY) list.splice(0, list.length - MAX_HISTORY);
+  return list;
+}
+
 function pushRecord(peer, record) {
   const list = S.messages.get(peer) || [];
   list.push(record);
   list.sort((a, b) => (a.ts - b.ts) || String(a.id).localeCompare(String(b.id)));
-  S.messages.set(peer, list);
+  S.messages.set(peer, capList(list));
   persist(peer);
 }
 
@@ -899,7 +907,7 @@ function previewText(rec) {
   switch (rec.kind) {
     case 'image': return `${prefix}📷 Photo`;
     case 'file': return `${prefix}📎 ${p.name || 'File'}`;
-    case 'voice': return `${prefix}🎙 Voice note`;
+    case 'voice': return `${prefix}🎙 ${String(p.text || '').trim().slice(0, 70) || 'Voice note'}`;
     case 'call': return `${prefix}${callNoteText(p)}`;
     default: return prefix + String(p.text || '').replace(/\s+/g, ' ').slice(0, 90);
   }
@@ -1299,7 +1307,74 @@ function buildVoice(rec) {
   });
 
   wrap.append(btn, bars, time, audio);
-  return wrap;
+
+  // Transcript row. A note you sent already carries the words captured while
+  // recording; a received note can be transcribed on this device while it
+  // plays (approximate — the recognizer hears it through the speakers).
+  const transcript = el('div', { class: 'voice-transcript' });
+  const stored = String(rec.payload.text || '').trim();
+  const canHear = Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const bodyEl = el('div', { class: 'voice-transcript-body' });
+  const btnEl = el('button', {
+    class: 'transcript-btn', type: 'button', 'aria-label': 'Transcribe voice note',
+    onclick: async () => {
+      if (transcript.dataset.open === '1') {
+        transcript.dataset.open = '0';
+        return;
+      }
+      transcript.dataset.open = '1';
+      if (stored) {
+        bodyEl.textContent = stored;
+        return;
+      }
+      bodyEl.textContent = 'Transcribing…';
+      const text = await transcribePlayback();
+      bodyEl.textContent = text || 'Nothing recognisable picked up.';
+    },
+  });
+  const recorded = Boolean(rec.payload.text);
+  btnEl.textContent = 'Transcribe';
+  if (!recorded && !canHear) {
+    // Electron's Chromium ships without a speech backend, so do not promise a
+    // button that cannot work there — the tooltip says why.
+    btnEl.disabled = true;
+    btnEl.title = 'This build has no speech engine. Notes sent from a device that does carry their transcript.';
+  }
+  transcript.append(btnEl, bodyEl);
+  transcript.dataset.open = '0';
+
+  return el('div', { class: 'voice-wrap' }, wrap, transcript);
+}
+
+// Live recognition while a received note is playing — same on-device engine,
+// it simply hears the audio close to the speakers, so keep expectations low.
+const playedRecognizers = new Set();
+async function transcribePlayback() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return '';
+  return new Promise((resolve) => {
+    const hear = new SR();
+    hear.continuous = true;
+    hear.interimResults = false;
+    hear.lang = navigator.language || 'en-US';
+    let text = '';
+    const done = (finalText) => {
+      if (playedRecognizers.has(hear)) return;
+      playedRecognizers.add(hear);
+      try { hear.onend = null; hear.onresult = null; hear.onerror = null; hear.stop(); } catch {}
+      setTimeout(() => playedRecognizers.delete(hear), 400);
+      resolve(finalText.trim());
+    };
+    hear.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) text += ` ${event.results[i][0].transcript}`;
+      }
+    };
+    hear.onerror = () => done('');
+    hear.onend = () => done('');
+    try { hear.start(); } catch { resolve(''); return; }
+    setTimeout(() => done(''), 25000);
+  });
 }
 
 function convKey(rec) {
@@ -1509,7 +1584,7 @@ async function ingestGroupHistory(gk) {
           added++;
         }
         await S.vault.saveSession(member, state);
-        if (added) await S.vault.saveMessages(gk, list);
+        if (added) await S.vault.saveMessages(gk, capList(list));
       });
     } catch { /* not pairwise-connected to this member; skip */ }
   }
@@ -1541,7 +1616,7 @@ async function ingestHistory(peer, messages) {
     }
     if (added) {
       await S.vault.saveSession(peer, state);
-      await S.vault.saveMessages(peer, S.messages.get(peer));
+      await S.vault.saveMessages(peer, capList(S.messages.get(peer)));
       if (S.activePeer === peer) renderConversation({ scroll: false });
     }
   });
@@ -1843,7 +1918,63 @@ $('#btn-voice').addEventListener('click', async () => {
       stream.getTracks().forEach((track) => track.stop());
     };
     rec.start(200);
-    S.recorder = { rec, chunks, startedAt, stream };
+
+    // Speech-to-text runs while you record, entirely on this device — the
+    // built-in recognizer never sends audio to the relay, and the finished
+    // transcript travels inside the encrypted payload like everything else.
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let hear = null;
+    S.transcriptDraft = '';
+    if (SR) {
+      hear = new SR();
+      hear.continuous = true;
+      hear.interimResults = true;
+      hear.lang = navigator.language || 'en-US';
+      // A recognizer that errors and then ends would restart forever. Restart
+      // only on a clean end (tab switch), and give up after a few tries.
+      let restarts = 0;
+      let broken = false;
+      const sayLive = (text) => {
+        const liveEl = $('#rec-live');
+        if (liveEl) liveEl.textContent = text;
+      };
+      hear.onerror = (event) => {
+        const code = event?.error;
+        if (code === 'not-allowed' || code === 'service-not-allowed') {
+          broken = true;
+          sayLive('Speech-to-text is blocked — the note still records.');
+        } else if (code === 'network') {
+          broken = true;
+          sayLive('Speech-to-text needs its online engine — the note still records.');
+        }
+      };
+      hear.onend = () => {
+        if (broken || restarts >= 8 || S.recorder?.hear !== hear) return;
+        restarts += 1;
+        setTimeout(() => {
+          if (broken || S.recorder?.hear !== hear) return;
+          try { hear.start(); } catch { broken = true; }
+        }, 400);
+      };
+      hear.onresult = (event) => {
+        let finalText = '';
+        let live = '';
+        for (let i = 0; i < event.results.length; i++) {
+          const line = event.results[i][0].transcript;
+          if (event.results[i].isFinal) finalText += line;
+          else live += line;
+        }
+        S.transcriptDraft = `${finalText} ${live}`.replace(/\s+/g, ' ').trim().slice(0, 4000);
+        const liveEl = $('#rec-live');
+        if (liveEl) liveEl.textContent = S.transcriptDraft || 'Listening…';
+      };
+      try { hear.start(); } catch { hear = null; }
+    }
+
+    S.recorder = { rec, chunks, startedAt, stream, hear };
+    const liveEl = $('#rec-live');
+    liveEl.hidden = false;
+    liveEl.textContent = SR ? 'Listening…' : 'Speech-to-text is not available in this browser.';
     $('#record-bar').hidden = false;
     $('#rec-time').textContent = '0:00';
     clearInterval(S.recordingTimer);
@@ -1862,11 +1993,13 @@ function stopRecording() {
   clearInterval(S.recordingTimer);
   S.recorder = null;
   $('#record-bar').hidden = true;
+  $('#rec-live').hidden = true;
   return new Promise((resolve) => {
     active.rec.onstop = () => {
       active.stream.getTracks().forEach((track) => track.stop());
       resolve({ blob: new Blob(active.chunks, { type: active.rec.mimeType || 'audio/webm' }), duration: (Date.now() - active.startedAt) / 1000 });
     };
+    if (active.hear) { try { active.hear.onend = null; active.hear.stop(); } catch {} }
     try { active.rec.stop(); } catch { resolve(null); }
   });
 }
@@ -1876,12 +2009,15 @@ $('#rec-cancel').addEventListener('click', async () => {
   if (!active) return;
   active.rec.onstop = () => active.stream.getTracks().forEach((track) => track.stop());
   stopRecording();
+  S.transcriptDraft = '';
   toast('Voice note discarded.');
 });
 
 $('#rec-send').addEventListener('click', async () => {
   const peer = S.activePeer;
+  const transcript = (S.transcriptDraft || '').trim().slice(0, 4000);
   const result = await stopRecording();
+  S.transcriptDraft = '';
   if (!result || !result.blob.size || !peer) return;
   try {
     const bytes = new Uint8Array(await result.blob.arrayBuffer());
@@ -1893,6 +2029,7 @@ $('#rec-send').addEventListener('click', async () => {
       mime: 'audio/webm',
       duration: Math.max(1, Math.round(result.duration)),
       size: result.blob.size,
+      ...(transcript ? { text: transcript } : {}),
     });
   } catch (err) {
     toast(err.message || 'Could not send voice note.', 'err');
@@ -2317,6 +2454,98 @@ function appearancePane() {
     el('small', { class: 'net-hint', text: '“Match system” follows macOS or Windows appearance, and switches instantly when your system changes.' }));
 }
 
+/* ---------------------------------------------------------------- storage -- */
+
+function clearAttachmentCache() {
+  for (const url of S.mediaCache.values()) {
+    try { URL.revokeObjectURL(url); } catch {}
+  }
+  S.mediaCache.clear();
+}
+
+// Drop every chat back to MAX_HISTORY notes and reload the open one, so the
+// in-memory copies cannot immediately grow the store again on the next save.
+async function trimLocalHistory() {
+  const removed = await S.vault.trimHistory();
+  const active = S.activePeer;
+  S.messages.clear();
+  if (active) {
+    S.messages.set(active, await S.vault.loadMessages(active));
+    renderConversation({ scroll: false });
+  }
+  renderChatList();
+  return removed;
+}
+
+function storagePane() {
+  const stat = (value, label) => el('div', { class: 'storage-stat' }, el('b', { text: value }), el('span', { text: label }));
+  const fmt = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+  const stats = el('div', { class: 'storage-stats' }, el('small', { class: 'net-hint', text: 'Counting…' }));
+
+  const refresh = async () => {
+    stats.innerHTML = '';
+    try {
+      const { chats, notes, bytes } = await S.vault.historyStats();
+      stats.append(
+        stat(String(notes), notes === 1 ? 'note' : 'notes'),
+        stat(String(chats), chats === 1 ? 'chat' : 'chats'),
+        stat(fmt(bytes), 'on this device'),
+        stat(String(S.mediaCache.size), 'previews in memory'),
+      );
+    } catch {
+      stats.append(el('small', { class: 'net-hint', text: 'Local storage is not readable in this window.' }));
+      return;
+    }
+  };
+  void refresh();
+
+  const trimBtn = el('button', {
+    class: 'ghost', type: 'button', text: 'Trim',
+    onclick: async () => {
+      busy(trimBtn, 'Trimming…');
+      try {
+        const removed = await trimLocalHistory();
+        toast(removed ? `Trimmed ${removed} old note${removed === 1 ? '' : 's'}.` : `Nothing to trim — every chat is under ${MAX_HISTORY}.`);
+      } catch (err) {
+        toast(err.message || 'Could not trim history.', 'err');
+      } finally {
+        unbusy(trimBtn);
+        await refresh();
+      }
+    },
+  });
+
+  const cacheBtn = el('button', {
+    class: 'ghost', type: 'button', text: 'Clear',
+    onclick: () => {
+      const had = S.mediaCache.size;
+      clearAttachmentCache();
+      refresh();
+      toast(had ? `Freed ${had} decrypted preview${had === 1 ? '' : 's'} from memory.` : 'No previews were cached.');
+    },
+  });
+
+  return el('div', {},
+    el('small', { class: 'net-hint', text: 'Everything below lives on this device only — never on the relay.' }),
+    stats,
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' },
+        el('div', { text: 'History limit' }),
+        el('small', { text: `Each chat keeps its newest ${MAX_HISTORY} notes; older ones are dropped from local storage as new ones arrive.` })),
+      el('span', { class: 'chip', text: `${MAX_HISTORY} per chat` })),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' },
+        el('div', { text: 'Trim old notes now' }),
+        el('small', { text: 'Applies the limit straight away to every chat on this device. Trimmed notes stay on the relay and can be pulled back.' })),
+      trimBtn),
+    el('div', { class: 'row-item' },
+      el('div', { class: 'grow' },
+        el('div', { text: 'Attachment previews' }),
+        el('small', { text: 'Decrypted images and voice notes held in memory so they reopen instantly. Files themselves stay E2E on the relay.' })),
+      cacheBtn),
+    el('small', { class: 'net-hint', text: 'Want everything gone? Security → “Clear local history” wipes notes and ratchets for good.' }));
+}
+
 function networkPane() {
   return el('div', {}, netBlock(),
     el('small', { class: 'net-hint', text: 'Keep both goats pointed at the same relay so messages flow between them.' }));
@@ -2460,6 +2689,7 @@ function openSettings(category = S.settingsCat || 'profile') {
   const panes = {
     profile: profilePane,
     appearance: appearancePane,
+    storage: storagePane,
     network: networkPane,
     notify: notifyPane,
     privacy: privacyPane,
@@ -2489,6 +2719,7 @@ function openSettings(category = S.settingsCat || 'profile') {
   const labels = {
     profile: ['Profile', 'users'],
     appearance: ['Appearance', 'smile'],
+    storage: ['Storage', 'download'],
     network: ['Network', 'screen'],
     notify: ['Notifications', 'bell'],
     privacy: ['Security', 'lock'],

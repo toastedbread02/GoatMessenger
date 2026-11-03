@@ -151,11 +151,12 @@
       <button class="icon-btn" type="button" id="btn-attach" title="Send a file"><svg><use href="#i-clip"/></svg></button>
       <button class="icon-btn" type="button" id="btn-emoji" title="Emoji"><svg><use href="#i-smile"/></svg></button>
       <textarea id="composer-input" rows="1" placeholder="Message…" spellcheck="true"></textarea>
-      <button class="icon-btn" type="button" id="btn-voice" title="Hold to record a voice note"><svg><use href="#i-mic"/></svg></button>
+      <button class="icon-btn" type="button" id="btn-voice" title="Record a voice note (transcribed on this device)"><svg><use href="#i-mic"/></svg></button>
       <button class="send-btn" type="submit" id="btn-send" title="Send"><svg><use href="#i-send"/></svg></button>
       <div class="emoji-pop" id="emoji-pop" hidden></div>
       <div class="record-bar" id="record-bar" hidden>
         <span class="rec-dot"></span><span id="rec-time">0:00</span>
+        <div class="record-live" id="rec-live" aria-live="polite" hidden></div>
         <button type="button" class="ghost" id="rec-cancel">Cancel</button>
         <button type="button" class="primary small" id="rec-send">Send</button>
       </div>
