@@ -2607,14 +2607,42 @@ function showRelayWarning(message) {
           showRelayWarning(res.relayError);
           return;
         }
-        S.api = new Api(res.relayUrl);
-        S.info.relayUrl = res.relayUrl;
-        $('#relay-label').textContent = `relay ${res.relayUrl}`;
-        node.hidden = true;
+        await adoptRelay(res, node);
       },
     }),
   );
   node.hidden = false;
+  // Don't make the user watch for the relay — after a machine slept, a tunnel
+  // hiccup, or a relay restart, this recovers the moment the relay answers.
+  startRelayWatch();
+}
+
+let relayWatchTimer = null;
+
+/** Points the live session at a newly-verified relay and clears the warning. */
+async function adoptRelay(res, warnNode) {
+  S.api = new Api(res.relayUrl);
+  S.info.relayUrl = res.relayUrl;
+  const label = $('#relay-label');
+  if (label) label.textContent = `relay ${res.relayUrl}`;
+  showBootNote('Ready.');
+  if (warnNode) warnNode.hidden = true;
+  if (relayWatchTimer) { clearInterval(relayWatchTimer); relayWatchTimer = null; }
+}
+
+/** Polls every few seconds while the relay is down; hidden tabs skip a beat. */
+function startRelayWatch() {
+  if (relayWatchTimer) return;
+  relayWatchTimer = setInterval(async () => {
+    if (document.hidden) return;
+    try {
+      const res = await window.goat.retryRelay();
+      if (!res.relayError) {
+        await adoptRelay(res, $('#relay-warning'));
+        toast('The relay is back online. You can sign in.');
+      }
+    } catch { /* still down; keep watching */ }
+  }, 6000);
 }
 
 async function boot() {
