@@ -8,6 +8,7 @@ const EMPTY = () => ({
   contacts: {},   // user -> { peer -> { state, since } }
   messages: {},   // roomId -> [ { id, seq, from, to, env, ts, clientId } ]
   files: {},      // id -> { owner, name, size, mime, path, ts }
+  groups: {},     // gid -> { id, name, owner, members: [usernames], createdAt }
   seq: 0,
 });
 
@@ -154,6 +155,71 @@ class Store {
   lastMessage(a, b) {
     const list = this.data.messages[Store.room(a, b)] || [];
     return list.length ? list[list.length - 1] : null;
+  }
+
+  /* groups ----------------------------------------------------------------- */
+
+  createGroup({ id, name, owner, members }) {
+    const rec = {
+      id: String(id),
+      name: String(name),
+      owner: String(owner).toLowerCase(),
+      members: members.map((m) => String(m).toLowerCase()).filter((m, i, all) => m && all.indexOf(m) === i),
+      createdAt: Date.now(),
+    };
+    this.data.groups[rec.id] = rec;
+    this.touch();
+    return rec;
+  }
+
+  getGroup(id) {
+    return this.data.groups[String(id)] || null;
+  }
+
+  groupsOf(user) {
+    const name = String(user).toLowerCase();
+    return Object.values(this.data.groups)
+      .filter((g) => g.members.includes(name))
+      .map((g) => ({ ...g }));
+  }
+
+  shareGroup(a, b) {
+    const key = String(b).toLowerCase();
+    for (const g of this.groupsOf(a)) {
+      if (g.members.includes(key)) return true;
+    }
+    return false;
+  }
+
+  /** Removes a member from a group or deletes the group when it empties.
+      Returns the new group record, or null when the group was deleted. */
+  leaveGroup(id, user) {
+    const rec = this.data.groups[String(id)];
+    if (!rec) return null;
+    const name = String(user).toLowerCase();
+    rec.members = rec.members.filter((m) => m !== name);
+    if (rec.members.length <= 1) { // 1 member or none: a group is not a chat
+      delete this.data.groups[rec.id];
+      this.touch();
+      return null;
+    }
+    this.touch();
+    return { ...rec };
+  }
+
+  /** Removes a user from every group on their way out (account deletion).
+      Returns the still-alive group records they were removed from. */
+  dropGroupsFor(username) {
+    const name = String(username).toLowerCase();
+    const touched = [];
+    for (const [id, rec] of Object.entries(this.data.groups)) {
+      if (!rec.members.includes(name)) continue;
+      rec.members = rec.members.filter((m) => m !== name);
+      if (rec.members.length <= 1) delete this.data.groups[id];
+      else touched.push({ ...rec });
+    }
+    this.touch();
+    return touched;
   }
 
   /* files ------------------------------------------------------------------ */

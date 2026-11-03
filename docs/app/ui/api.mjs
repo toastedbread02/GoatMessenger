@@ -70,9 +70,12 @@ export class Api {
   removeContact(username) { return this.request(`/api/contacts?username=${encodeURIComponent(username)}`, { method: 'DELETE' }); }
   keys(username) { return this.request(`/api/keys?username=${encodeURIComponent(username)}`); }
   history(username, after = 0) { return this.request(`/api/messages?username=${encodeURIComponent(username)}&after=${after}`); }
-  sendMessage(to, env, clientId) {
-    return this.request('/api/messages', { method: 'POST', body: { to, env, clientId }, timeout: 20000 });
+  sendMessage(to, env, clientId, gid) {
+    return this.request('/api/messages', { method: 'POST', body: { to, env, clientId, ...(gid ? { gid } : {}) }, timeout: 20000 });
   }
+  createGroup(name, members) { return this.request('/api/groups', { method: 'POST', body: { name, members } }); }
+  groups() { return this.request('/api/groups'); }
+  leaveGroup(gid) { return this.request(`/api/groups/${encodeURIComponent(gid)}/leave`, { method: 'POST', body: {} }); }
   updateProfile(profile) { return this.request('/api/profile', { method: 'POST', body: profile }); }
   upload(bytes, name, mime) {
     return this.request('/api/upload', {

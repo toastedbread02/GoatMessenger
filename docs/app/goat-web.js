@@ -131,6 +131,28 @@
     },
     setBadge: async () => true,
     setTheme: async () => true,
+
+    // -- notifications (web Notification API; permission is a browser matter)
+    notify: async (payload = {}) => {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+      if (document.visibilityState === 'visible' && document.hasFocus()) return false;
+      const note = new Notification(String(payload.title || 'GoatMessenger'), {
+        body: String(payload.body || ''),
+        tag: String(payload.peer || ''),
+      });
+      note.onclick = () => {
+        window.focus();
+        window.dispatchEvent(new CustomEvent('goat:notify-click', { detail: { peer: payload.peer, where: payload.where } }));
+        note.close();
+      };
+      return true;
+    },
+    onNotifyClick: (cb) => {
+      if (cb?.__goatWired) return;
+      const listener = (event) => cb({ peer: event.detail?.peer, where: event.detail?.where });
+      window.addEventListener('goat:notify-click', listener);
+      cb.__goatWired = true;
+    },
     requestMedia: async () => true,
     openPath: async (target) => {
       if (typeof target === 'string' && target.startsWith('blob:')) { window.open(target); return true; }

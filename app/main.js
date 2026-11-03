@@ -533,6 +533,30 @@ ipcMain.handle('app:badge', (event, count) => {
   return true;
 });
 
+// OS notification for messages that need attention. The renderer decides *if*
+// (only when the user is not already in that chat); the main process delivers
+// and routes clicks back to the sender's window so the right chat opens.
+ipcMain.handle('app:notify', (event, payload) => {
+  if (E2E) return false; // automated runs stay quiet
+  if (!payload || typeof payload.title !== 'string') return false;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const note = new Notification({
+    title: payload.title.slice(0, 90),
+    body: String(payload.body || '').slice(0, 140),
+    ...(payload.where ? { subtitle: '' } : {}),
+  });
+  note.on('click', () => {
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      win.webContents.send('app:notify-click', { peer: payload.peer, where: payload.where });
+    }
+  });
+  note.show();
+  return true;
+});
+
 ipcMain.handle('media:access', async (event, kind) => {
   if (FAKE_MEDIA || E2E) return true;
   const { systemPreferences } = require('electron');

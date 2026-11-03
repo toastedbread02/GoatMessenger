@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('goat', {
   revealPath: (target) => ipcRenderer.invoke('app:revealPath', target),
   setBadge: (count) => ipcRenderer.invoke('app:badge', count),
   setTheme: (mode) => ipcRenderer.invoke('app:theme', mode),
+  notify: (payload) => ipcRenderer.invoke('app:notify', payload),
+  onNotifyClick: (cb) => ipcRenderer.on('app:notify-click', (_event, data) => cb(data)),
   session: {
     load: () => ipcRenderer.invoke('login:load'),
     save: (payload) => ipcRenderer.invoke('login:save', payload),

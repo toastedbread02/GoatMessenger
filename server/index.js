@@ -205,6 +205,15 @@ function createGoatServer({
   const pairAccepted = (a, b) =>
     store.relation(a, b)?.state === 'accepted' && store.relation(b, a)?.state === 'accepted';
 
+  /* ------------------------------------------------------------- group chats - */
+
+  const publicGroup = (g) => ({
+    id: g.id, name: g.name, owner: g.owner, members: g.members, createdAt: g.createdAt,
+  });
+  // Two goats may not be direct contacts but share a group: bundle fetches and
+  // ciphertext drops for group deliveries ride on shared membership.
+  const canReach = (a, b) => pairAccepted(a, b) || store.shareGroup(a, b);
+
   /* ---------------------------------------------------------------- sessions - */
 
   const authenticate = (req) => {
@@ -251,6 +260,7 @@ function createGoatServer({
     return {
       me: publicUser(me, presence),
       contacts,
+      groups: store.groupsOf(me.username).map(publicGroup),
       server: { name: 'goatmessenger', version: 1, encrypted: true },
     };
   };
@@ -397,6 +407,11 @@ function createGoatServer({
             sendTo(rel.peer, { t: 'contact-removed', user: me.username.toLowerCase() });
           }
         }
+        for (const group of store.dropGroupsFor(me.username)) {
+          for (const member of group.members) {
+            if (member !== me.username.toLowerCase()) sendTo(member, { t: 'group', group });
+          }
+        }
         const wsSet = sockets.get(me.username.toLowerCase());
         if (wsSet) {
           for (const ws of wsSet) { try { ws.close(4002, 'account-deleted'); } catch {} }
@@ -434,7 +449,7 @@ function createGoatServer({
         const rec = store.user(peer);
         if (!rec) return fail(res, 404, 'No goat by that name.');
         const self = rec.username.toLowerCase() === me.username.toLowerCase();
-        if (!self && !pairAccepted(me.username, rec.username)) return fail(res, 403, 'Not connected.');
+        if (!self && !canReach(me.username, rec.username)) return fail(res, 403, 'Not connected.');
         return json(res, 200, { username: rec.username, keys: rec.keys });
       }
 
@@ -491,12 +506,61 @@ function createGoatServer({
         return json(res, 200, { messages: store.messagesBetween(me.username, peer, after) });
       }
 
+      // Group chats. Membership is plain server state; content is still
+      // end-to-end encrypted, sealed per member over pairwise ratchets.
+      if (route === '/api/groups' && req.method === 'POST') {
+        const body = await readJson(req);
+        const name = String(body.name || '').trim().slice(0, 60);
+        if (!name) return fail(res, 400, 'Give the group a name.');
+        const requested = Array.isArray(body.members) ? body.members.map(String).filter(Boolean) : [];
+        if (requested.length + 1 > 31) return fail(res, 400, 'Groups hold up to 31+1 goats.');
+        const members = new Set([me.username.toLowerCase()]);
+        for (const candidate of requested) {
+          const rec = store.user(candidate);
+          if (!rec) return fail(res, 404, `No goat by the name ${candidate}.`);
+          members.add(rec.username.toLowerCase());
+        }
+        const group = store.createGroup({
+          id: `g${crypto.randomBytes(8).toString('hex')}`,
+          name,
+          owner: me.username,
+          members: [...members],
+        });
+        const wire = { t: 'group', group: publicGroup(group) };
+        for (const member of group.members) sendTo(member, wire);
+        return json(res, 200, { group: publicGroup(group) });
+      }
+
+      if (route === '/api/groups' && req.method === 'GET') {
+        return json(res, 200, { groups: store.groupsOf(me.username).map(publicGroup) });
+      }
+
+      const leaveMatch = route.match(/^\/api\/groups\/(gh?[0-9a-f]+)\/leave$/);
+      if (leaveMatch && req.method === 'POST') {
+        const gid = leaveMatch[1];
+        const rec = store.getGroup(gid);
+        if (!rec || !rec.members.includes(me.username.toLowerCase())) return fail(res, 404, 'No such group.');
+        const next = store.leaveGroup(gid, me.username);
+        for (const member of next ? next.members : []) sendTo(member, { t: 'group', group: publicGroup(next) });
+        return json(res, 200, { ok: true, group: next ? publicGroup(next) : null });
+      }
+
       if (route === '/api/messages' && req.method === 'POST') {
         const body = await readJson(req);
         const peer = String(body.to || '').trim();
         const rec = store.user(peer);
         if (!rec) return fail(res, 404, 'No goat by that name.');
-        if (!pairAccepted(me.username, peer)) return fail(res, 403, 'Not connected.');
+        const gid = typeof body.gid === 'string' ? body.gid : '';
+        if (gid) {
+          // Group delivery: sender and recipient must be in that group.
+          const groupRec = store.getGroup(gid);
+          if (!groupRec || !groupRec.members.includes(me.username.toLowerCase())
+            || !groupRec.members.includes(rec.username.toLowerCase())) {
+            return fail(res, 403, 'Not in that group.');
+          }
+        } else if (!pairAccepted(me.username, peer)) {
+          return fail(res, 403, 'Not connected.');
+        }
         const env = body.env;
         if (!env || typeof env !== 'object' || typeof env.ct !== 'string' || !env.header) {
           return fail(res, 400, 'Malformed envelope.');
@@ -506,7 +570,7 @@ function createGoatServer({
         });
         const wire = { t: 'message', msg };
         sendTo(rec.username, wire);
-        sendTo(me.username, wire);
+        if (rec.username !== me.username) sendTo(me.username, wire);
         return json(res, 200, { msg });
       }
 
@@ -533,7 +597,9 @@ function createGoatServer({
         const rec = store.getFile(url.pathname.split('/').pop());
         if (!rec) return fail(res, 404, 'No such file.');
         const owner = rec.owner;
-        const allowed = owner === me.username.toLowerCase() || pairAccepted(me.username, owner);
+        const allowed = owner === me.username.toLowerCase()
+          || pairAccepted(me.username, owner)
+          || store.shareGroup(me.username, owner);
         if (!allowed) return fail(res, 403, 'Not allowed.');
         if (!fs.existsSync(rec.path)) return fail(res, 410, 'File expired.');
         res.writeHead(200, {

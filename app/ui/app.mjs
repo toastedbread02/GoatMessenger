@@ -18,6 +18,7 @@ const S = {
   identity: null,
   me: null,
   contacts: new Map(),      // username -> contact record
+  groups: new Map(),        // `group:<gid>` -> { id, name, members, owner, createdAt }
   bundles: new Map(),       // username -> public key bundle
   messages: new Map(),      // username -> message records (decrypted, local)
   verified: new Map(),      // username -> timestamp
@@ -38,6 +39,7 @@ const S = {
   droppedEnvelopes: 0,
   themeMode: 'system',
   settingsCat: 'profile',
+  notify: { sound: true, desktop: true },   // mirrored into vault prefs
 };
 
 const EMOJI = ['🐐', '🐑', '🌿', '🌾', '🔥', '✨', '😄', '😂', '🥹', '😎', '🤝', '👋', '👍', '🙏', '💚', '💛',
@@ -84,6 +86,9 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 
 const isOnline = (peer) => Boolean(S.presence.get(String(peer).toLowerCase()));
 
+const isGroup = (peer) => S.groups.has(String(peer));
+const groupOf = (peer) => S.groups.get(String(peer)) || null;
+
 // Ratchet state must never be touched by two async operations at once.
 const locks = new Map();
 function withLock(key, fn) {
@@ -94,16 +99,27 @@ function withLock(key, fn) {
 }
 
 function displayName(peer) {
-  const rec = S.contacts.get(String(peer).toLowerCase());
+  const key = String(peer);
+  if (isGroup(key)) return groupOf(key)?.name || key;
+  const rec = S.contacts.get(key.toLowerCase());
   return rec?.displayName || peer;
 }
 
 function accentOf(peer) {
-  return S.contacts.get(String(peer).toLowerCase())?.accent ?? 30;
+  const key = String(peer);
+  if (isGroup(key)) {
+    // Deterministic hue so the same group paints the same avatar everywhere.
+    let h = 0;
+    for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 360;
+    return h;
+  }
+  return S.contacts.get(key.toLowerCase())?.accent ?? 30;
 }
 
 function avatarOf(peer) {
-  return S.contacts.get(String(peer).toLowerCase())?.avatar || '';
+  const key = String(peer);
+  if (isGroup(key)) return '';
+  return S.contacts.get(key.toLowerCase())?.avatar || '';
 }
 
 function bannerOf(peer) {
@@ -310,6 +326,7 @@ async function startSession({ username, token, identity, bootstrap, backup }) {
 
   S.me = bootstrap.me;
   S.contacts.clear();
+  S.groups.clear();
   S.bundles.clear();
   S.messages.clear();
   S.unread.clear();
@@ -327,6 +344,10 @@ async function startSession({ username, token, identity, bootstrap, backup }) {
     for (const [peer, count] of Object.entries(prefs.unread)) S.unread.set(peer, count);
   }
   if (prefs.theme) applyTheme(prefs.theme);
+  S.notify = {
+    sound: prefs.notifySound === undefined ? true : Boolean(prefs.notifySound),
+    desktop: prefs.notifyDesktop === undefined ? true : Boolean(prefs.notifyDesktop),
+  };
 
   localStorage.setItem('gm:lastUser', username);
   // Stay signed in on relaunch: token + private identity go to the OS keychain.
@@ -341,7 +362,8 @@ async function startSession({ username, token, identity, bootstrap, backup }) {
   wireApi();
   S.api.connect();
 
-  const last = prefs.lastPeer && S.contacts.has(prefs.lastPeer) && S.contacts.get(prefs.lastPeer).state === 'accepted'
+  const last = prefs.lastPeer && (S.contacts.has(prefs.lastPeer) || S.groups.has(prefs.lastPeer))
+    && (S.groups.has(prefs.lastPeer) || S.contacts.get(prefs.lastPeer).state === 'accepted')
     ? prefs.lastPeer : null;
   if (last) await openChat(last, { silent: true });
   else showEmpty();
@@ -353,6 +375,12 @@ async function startSession({ username, token, identity, bootstrap, backup }) {
 
 function applyBootstrap(data) {
   if (data.me) S.me = data.me;
+  if (data.groups) {
+    // The relay is authoritative for membership; keep local shout-outs in sync.
+    S.groups.clear();
+    for (const g of data.groups) S.groups.set(`group:${g.id}`, g);
+    if (S.activePeer && !S.groups.has(S.activePeer)) showEmpty();
+  }
   if (!data.contacts) return;
   S.contacts.clear();
   for (const contact of data.contacts) {
@@ -438,6 +466,27 @@ async function handleWsEvent(msg) {
       toast(`${msg.user} left your herd.`);
       await refreshBootstrap();
       break;
+    case 'group': {
+      const g = msg.group;
+      if (!g?.id) break;
+      const key = `group:${g.id}`;
+      const isNew = !S.groups.has(key);
+      S.groups.set(key, g);
+      if (isNew) {
+        toast(`${g.owner === S.me.username.toLowerCase() ? 'Group created' : `${displayName(g.owner)} added you to “${g.name}”`}.`);
+      } else if (S.activePeer === key) renderHeader();
+      renderChatList();
+      break;
+    }
+    case 'group-gone': {
+      const key = `group:${msg.id}`;
+      if (S.groups.delete(key)) {
+        toast(`The group “${displayName(key)}” is gone.`);
+        if (S.activePeer === key) showEmpty();
+        renderChatList();
+      }
+      break;
+    }
     case 'profile': {
       const peer = msg.user.username.toLowerCase();
       const existing = S.contacts.get(peer);
@@ -495,6 +544,7 @@ async function ensureSession(peer) {
 }
 
 async function sendPayload(peer, kind, payload) {
+  if (isGroup(peer)) return sendGroupPayload(peer, kind, payload);
   const key = String(peer).toLowerCase();
   const clientId = D.randomId(8);
   const envelope = await withLock(key, async () => {
@@ -530,6 +580,62 @@ async function sendPayload(peer, kind, payload) {
     toast(err.message || 'Message failed to send.', 'err');
     throw err;
   }
+  return record;
+}
+
+// Group send: one story for the sender, one sealed copy per member. Each copy
+// rides that member's pairwise ratchet, so the relay sees only ciphertext —
+// same guarantee as 1:1, no shared keys. `gid` is how the receiver routes it.
+async function sendGroupPayload(peer, kind, payload) {
+  const peerKey = String(peer);
+  const group = groupOf(peerKey);
+  if (!group) throw new Error('This group no longer exists.');
+  const gid = group.id;
+  const me = S.me.username.toLowerCase();
+  const members = group.members.filter((m) => m !== me);
+  if (!members.length) throw new Error('You are the only goat here.');
+
+  const clientId = D.randomId(8);
+  const record = {
+    id: null,
+    clientId,
+    peer: peerKey,
+    dir: 'out',
+    from: me,
+    ts: Date.now(),
+    kind,
+    payload,
+    status: 'sending',
+  };
+  pushRecord(peerKey, record);
+  renderChatList();
+  if (S.activePeer === peerKey) renderConversation({ scroll: 'bottom' });
+
+  let ok = 0;
+  let failed = 0;
+  for (const member of members) {
+    try {
+      const envelope = await withLock(member, async () => {
+        const state = await ensureSession(member);
+        const env = await C.encryptMessage(state, { kind, gid, ...payload });
+        await S.vault.saveSession(member, state);
+        return env;
+      });
+      await S.api.sendMessage(member, envelope, clientId, gid);
+      ok++;
+    } catch {
+      failed++;
+    }
+  }
+
+  updateRecord(peerKey, (r) => r.clientId === clientId && r.dir === 'out', (r) => {
+    r.status = ok ? 'sent' : 'failed';
+    if (failed) r.missed = failed;
+  });
+  if (ok) S.sound.sent();
+  if (failed) toast(`Could not deliver to ${failed} of ${members.length} goats.`, 'err');
+  renderChatList();
+  if (S.activePeer === peerKey) renderConversation({ scroll: false });
   return record;
 }
 
@@ -615,36 +721,57 @@ async function receiveMessage(msg) {
     return;
   }
 
-  if (!S.contacts.has(peer)) {
+  const gid = typeof payload.gid === 'string' ? payload.gid : '';
+  const gKey = gid && S.groups.get(`group:${gid}`) ? `group:${gid}` : null;
+  if (gKey) delete payload.gid; // consumers see a normal message record
+  else if (!S.contacts.has(peer)) {
     await refreshBootstrap();
   }
 
   const record = {
     id: msg.id,
     clientId: msg.clientId || null,
-    peer,
+    peer: gKey || peer,
     dir: 'in',
-    from: peer,
+    from: peer, // the real sender; for groups the conversation is the group
     ts: msg.ts,
     seq: msg.seq,
     kind: payload.kind || 'text',
     payload,
     status: 'delivered',
   };
-  pushRecord(peer, record);
+  pushRecord(record.peer, record);
 
-  const isActive = S.activePeer === peer;
-  if (isActive) {
-    S.sound.received();
-    sendRead(peer, msg.seq);
-  } else {
-    S.unread.set(peer, (S.unread.get(peer) || 0) + 1);
-    S.sound.received();
+  const isActive = S.activePeer === record.peer;
+  await notifyIncoming(record.peer, peer, payload, record);
+  if (!isActive) {
+    S.unread.set(record.peer, (S.unread.get(record.peer) || 0) + 1);
     rememberUnread();
+  } else if (!gKey) {
+    sendRead(peer, msg.seq);
   }
   renderChatList();
-  if (S.activePeer === peer) renderConversation({ scroll: 'bottom' });
+  if (S.activePeer === record.peer) renderConversation({ scroll: 'bottom' });
   syncBadge();
+}
+
+// Audible + OS notification for a message that needs attention: a new note in
+// any chat you are not currently looking at (or while the app is unfocused).
+function notifyIncoming(peerKey, senderPeer, payload, record) {
+  if (S.info?.e2e) return; // automated runs stay quiet
+  const inChat = S.activePeer === peerKey && !document.hidden && document.hasFocus();
+  if (!inChat) {
+    if (S.notify.sound) S.sound.notify();
+    if (S.notify.desktop) {
+      const name = displayName(senderPeer);
+      window.goat?.notify?.({
+        title: isGroup(peerKey) ? `${displayName(peerKey)} — ${name}` : name,
+        body: previewText(record) || 'New message',
+        peer: peerKey,
+        where: isGroup(peerKey) ? displayName(peerKey) : '',
+      })?.catch?.(() => {});
+    }
+  }
 }
 
 async function checkPrekeyIdentity(peer, prekey) {
@@ -705,12 +832,14 @@ const convState = { peer: null, rows: new Map() };
 function stripAnim(node) { node.style.animation = 'none'; return node; }
 
 function contactRowSig(peer) {
-  const rec = S.contacts.get(peer);
+  const g = isGroup(peer) ? groupOf(peer) : null;
+  const rec = g ? { displayName: g.name, accent: accentOf(peer) } : S.contacts.get(peer);
+  if (!rec) return null;
   const list = S.messages.get(peer) || [];
   const last = list[list.length - 1];
   return JSON.stringify([
     S.activePeer === peer,
-    rec?.displayName, rec?.accent, isOnline(peer),
+    rec?.displayName, rec?.accent, isGroup(peer) ? 'group' : isOnline(peer),
     rec?.avatar || '', rec?.banner || '',
     last?.ts || rec?.last?.ts || rec?.since || 0, rec?.since,
     (S.typingUntil.get(peer) || 0) > Date.now(),
@@ -720,7 +849,10 @@ function contactRowSig(peer) {
 }
 
 function contactRow(peer, { fresh = true } = {}) {
-  const rec = S.contacts.get(peer);
+  const g = isGroup(peer) ? groupOf(peer) : null;
+  const rec = g
+    ? { displayName: g.name, accent: accentOf(peer), state: 'accepted' }
+    : S.contacts.get(peer);
   if (!rec) return null;
   const list = S.messages.get(peer) || [];
   const last = list[list.length - 1];
@@ -731,21 +863,27 @@ function contactRow(peer, { fresh = true } = {}) {
     dataset: { peer },
   });
   const avatar = el('div', { class: 'avatar' });
-  D.paintAvatar(avatar, {
-    name: rec.displayName || rec.username, accent: rec.accent, online: isOnline(peer), showPresence: true, avatar: rec.avatar,
-  });
+  if (g) {
+    D.paintAvatar(avatar, { name: `👥 ${rec.displayName || g.name}`, accent: rec.accent });
+  } else {
+    D.paintAvatar(avatar, {
+      name: rec.displayName || rec.username, accent: rec.accent, online: isOnline(peer), showPresence: true, avatar: rec.avatar,
+    });
+  }
   const main = el('div', { class: 'chat-main' });
   const top = el('div', { class: 'chat-top' },
     el('div', { class: 'chat-name', text: rec.displayName || rec.username }),
     el('div', { class: 'chat-time', text: D.shortRelative(last?.ts || rec.last?.ts || rec.since) }));
   const preview = el('div', { class: 'chat-preview' });
-  const typing = (S.typingUntil.get(peer) || 0) > Date.now();
+  const typing = !g && (S.typingUntil.get(peer) || 0) > Date.now();
   if (typing) {
     preview.append(el('em', { text: 'typing…' }));
   } else if (last) {
-    preview.append(icon('lock', 'lockmini'), document.createTextNode(previewText(last)));
+    // Group previews name the sender so the list reads like a room.
+    const prefix = !g ? '' : last.dir === 'out' ? 'You: ' : `${displayName(last.from)}: `;
+    preview.append(icon('lock', 'lockmini'), document.createTextNode(prefix + previewText(last)));
   } else {
-    preview.append(el('span', { text: 'No messages yet' }));
+    preview.append(el('span', { text: `${g ? 'New group — say hello' : 'No messages yet'}` }));
   }
   main.append(top, preview);
   row.append(avatar, main);
@@ -784,22 +922,33 @@ function renderChatList() {
   const query = S.search.trim().toLowerCase();
   const accepted = [...S.contacts.values()].filter((c) => c.state === 'accepted');
 
-  const scored = accepted.filter((c) => {
+  const groups = [...S.groups.values()].map((g) => ({
+    pseudo: 'group',
+    username: `group:${g.id}`,
+    displayName: g.name,
+    accent: accentOf(`group:${g.id}`),
+    state: 'accepted',
+    since: g.createdAt,
+  }));
+  const everyone = [...accepted, ...groups];
+  const scored = everyone.filter((c) => {
     if (!query) return true;
     if ((c.displayName || c.username).toLowerCase().includes(query)) return true;
     if (c.username.toLowerCase().includes(query)) return true;
-    const msgs = S.messages.get(c.username.toLowerCase()) || [];
+    const peer = c.pseudo ? c.username : c.username.toLowerCase();
+    const msgs = S.messages.get(peer) || [];
     return msgs.some((m) => String(m.payload?.text || '').toLowerCase().includes(query));
   }).sort((a, b) => {
-    const la = (S.messages.get(a.username.toLowerCase())?.at(-1)?.ts) || a.last?.ts || a.since || 0;
-    const lb = (S.messages.get(b.username.toLowerCase())?.at(-1)?.ts) || b.last?.ts || b.since || 0;
+    const key = (c) => (c.pseudo ? c.username : c.username.toLowerCase());
+    const la = (S.messages.get(key(a))?.at(-1)?.ts) || a.last?.ts || a.since || 0;
+    const lb = (S.messages.get(key(b))?.at(-1)?.ts) || b.last?.ts || b.since || 0;
     return lb - la;
   });
 
   const wanted = new Set();
   const seq = [];
   for (const contact of scored) {
-    const peer = contact.username.toLowerCase();
+    const peer = contact.pseudo ? contact.username : contact.username.toLowerCase();
     wanted.add(peer);
     const sig = contactRowSig(peer);
     let item = chatState.rows.get(peer);
@@ -874,6 +1023,54 @@ function renderRequests() {
   }
 }
 
+// Group info passed as a profile card: banner-less, member list, and the way out.
+function openGroupInfo() {
+  const key = S.activePeer;
+  const g = groupOf(key);
+  if (!g) return;
+  const members = el('div', { class: 'group-members' });
+  for (const member of [...g.members].sort()) {
+    const isMe = member === S.me.username.toLowerCase();
+    const row = el('div', { class: 'picker-row group-member' });
+    const avatar = el('div', { class: 'avatar' });
+    const rec = S.contacts.get(member);
+    const name = isMe ? `${S.me.displayName || member} (you)` : displayName(member);
+    D.paintAvatar(avatar, { name: displayName(member), accent: accentOf(member), avatar: rec?.avatar || '' });
+    const nameEl = el('div', { class: 'chat-name' });
+    nameEl.append(name);
+    const badge = isMe ? null : verifiedBadge(member);
+    if (badge) nameEl.append(badge);
+    row.append(avatar, nameEl,
+      member === g.owner ? el('span', { class: 'chip', text: 'creator' }) : null,
+      isMe ? null : el('span', { class: 'chip', text: isOnline(member) ? 'online' : 'offline' }));
+    members.append(row);
+  }
+  const card = el('div', { class: 'profile-card' },
+    el('div', { class: 'pc-banner' }),
+    el('div', { class: 'pc-main' },
+      (() => { const av = el('div', { class: 'avatar big pc-avatar' }); D.paintAvatar(av, { name: `👥 ${g.name}`, accent: accentOf(key) }); return av; })(),
+      el('div', { class: 'pc-id' },
+        el('div', { class: 'pc-name', text: g.name }),
+        el('div', { class: 'pc-handle', text: `${g.members.length} goats · end-to-end encrypted` }))),
+    members,
+    el('p', { class: 'sub', text: 'Group messages are sealed to every member separately over pairwise ratchets — the relay only ever carries ciphertext.' }),
+    el('div', { class: 'modal-actions' },
+      el('button', { class: 'ghost', text: 'Close', onclick: closeModal }),
+      el('button', { class: 'ghost danger-btn', text: 'Leave group', onclick: async () => {
+        try {
+          await S.api.leaveGroup(g.id);
+          toast(`You left “${g.name}”.`);
+        } catch (err) {
+          toast(err.message, 'err');
+          return;
+        }
+        showEmpty();
+        closeModal();
+        await refreshBootstrap();
+      } })));
+  openModal(el('div', { class: 'modal profile-modal' }, card));
+}
+
 async function acceptRequest(peer) {
   try {
     const data = await S.api.acceptContact(peer);
@@ -908,17 +1105,29 @@ function verifiedBadge(username) {
 function renderHeader() {
   const peer = S.activePeer;
   if (!peer) return;
+  const g = isGroup(peer) ? groupOf(peer) : null;
   const rec = S.contacts.get(peer);
   const avatar = $('#peer-avatar');
-  D.paintAvatar(avatar, { name: rec?.displayName || peer, accent: rec?.accent, online: isOnline(peer), showPresence: true, avatar: rec?.avatar });
+  D.paintAvatar(avatar, { name: displayName(peer), accent: accentOf(peer), online: g ? false : isOnline(peer), showPresence: !g, avatar: avatarOf(peer) });
   const nameEl = $('#peer-name');
   nameEl.innerHTML = '';
-  nameEl.append(rec?.displayName || peer);
+  nameEl.append(displayName(peer));
+  if (g) nameEl.append(el('span', { class: 'chip tiny', text: 'group' }));
   const badge = verifiedBadge(peer);
   if (badge) nameEl.append(badge);
 
   const sub = $('#peer-sub');
   sub.innerHTML = '';
+  if (g) {
+    sub.append(
+      el('i', { class: 'dot off' }),
+      el('span', { text: `${g.members.length} goats` }),
+      el('span', { text: '·' }),
+      el('span', { text: 'end-to-end encrypted' }),
+    );
+    $('#btn-verify').title = 'Groups keep pairwise ratchets';
+    return;
+  }
   const typing = (S.typingUntil.get(peer) || 0) > Date.now();
   if (typing) {
     sub.append(el('span', { text: `${rec?.displayName || peer} is typing…` }));
@@ -1117,14 +1326,21 @@ function messageRowNode(rec, prev, next, { fresh = true } = {}) {
       sameNext ? 'group-mid' : 'group-end',
     ].join(' '),
   });
+  const g = isGroup(peer);
   if (rec.dir === 'in') {
     if (!sameNext) {
       const avatar = el('div', { class: 'avatar msg-avatar' });
-      D.paintAvatar(avatar, { name: displayName(peer), accent: accentOf(peer), avatar: avatarOf(peer) });
+      // Groups show the sender's own face, not the conversation's.
+      D.paintAvatar(avatar, g
+        ? { name: displayName(rec.from), accent: accentOf(rec.from), avatar: avatarOf(rec.from) }
+        : { name: displayName(peer), accent: accentOf(peer), avatar: avatarOf(peer) });
       row.append(avatar);
     } else {
       row.append(el('div', { class: 'spacer' }));
     }
+  }
+  if (g && rec.dir === 'in' && !samePrev) {
+    row.append(el('div', { class: 'msg-sender', text: displayName(rec.from) }));
   }
   row.append(bubbleFor(rec));
   if (!fresh) {
@@ -1213,7 +1429,8 @@ function renderConversation({ scroll = 'bottom' } = {}) {
 
 async function openChat(peer, { silent = false } = {}) {
   const key = String(peer).toLowerCase();
-  if (!S.contacts.has(key) || S.contacts.get(key).state !== 'accepted') {
+  const g = S.groups.get(key);
+  if (!g && (!S.contacts.has(key) || S.contacts.get(key).state !== 'accepted')) {
     toast('Accept the request first to start talking.', 'err');
     return;
   }
@@ -1235,6 +1452,19 @@ async function openChat(peer, { silent = false } = {}) {
   renderTyping();
   if (changed && !silent) S.sound.chatOpen();
 
+  const hideCalls = Boolean(g);
+  for (const id of ['#btn-call-audio', '#btn-call-video', '#btn-verify']) {
+    const btn = $(id);
+    if (btn) btn.classList.toggle('is-hidden-for-group', hideCalls);
+  }
+
+  if (g) {
+    await ingestGroupHistory(key);
+    syncBadge();
+    $('#composer-input').focus();
+    return;
+  }
+
   const lastSeq = (S.messages.get(key) || []).reduce((max, r) => Math.max(max, r.seq || 0), 0);
   if (lastSeq) sendRead(key, lastSeq);
 
@@ -1245,6 +1475,45 @@ async function openChat(peer, { silent = false } = {}) {
 
   syncBadge();
   $('#composer-input').focus();
+}
+
+// Group history rides pairwise relay rooms (the sealed copies). Pull each
+// member's thread once when a group chat opens, and route the group envelopes.
+async function ingestGroupHistory(gk) {
+  const g = groupOf(gk);
+  if (!g) return;
+  const me = S.me.username.toLowerCase();
+  const known = new Set((S.messages.get(gk) || []).map((r) => r.id).filter(Boolean));
+  let added = 0;
+  for (const member of g.members) {
+    if (member === me) continue;
+    const list = S.messages.get(gk) || [];
+    if (list.length && added === 0 && known.size > 2) break; // already populated locally
+    try {
+      const { messages } = await S.api.history(member, 0);
+      await withLock(member, async () => {
+        const state = await S.vault.loadSession(member);
+        if (!state) return;
+        for (const msg of messages) {
+          if (known.has(msg.id)) continue;
+          if (msg.from === me) continue;
+          let payload;
+          try { payload = await C.decryptMessage(state, msg.env); } catch { continue; }
+          if (typeof payload.gid !== 'string' || payload.gid !== g.id) continue;
+          delete payload.gid;
+          known.add(msg.id);
+          list.push({
+            id: msg.id, clientId: msg.clientId || null, peer: gk, dir: 'in', from: member,
+            ts: msg.ts, seq: msg.seq, kind: payload.kind || 'text', payload, status: 'delivered',
+          });
+          added++;
+        }
+        await S.vault.saveSession(member, state);
+        if (added) await S.vault.saveMessages(gk, list);
+      });
+    } catch { /* not pairwise-connected to this member; skip */ }
+  }
+  if (added && S.activePeer === gk) renderConversation({ scroll: false });
 }
 
 async function ingestHistory(peer, messages) {
@@ -1259,6 +1528,7 @@ async function ingestHistory(peer, messages) {
       if (msg.from === S.me.username.toLowerCase()) continue;
       try {
         const payload = await C.decryptMessage(state, msg.env);
+        if (typeof payload.gid === 'string') continue; // group copies are ingested separately
         const rec = {
           id: msg.id, peer, dir: 'in', from: peer, ts: msg.ts, seq: msg.seq,
           kind: payload.kind || 'text', payload, status: 'delivered',
@@ -1308,7 +1578,7 @@ input.addEventListener('keydown', (event) => {
 });
 
 function sendTyping(on) {
-  if (!S.activePeer) return;
+  if (!S.activePeer || isGroup(S.activePeer)) return;
   const now = Date.now();
   if (on && now - S.typingSent < 1800) {
     scheduleTypingStop();
@@ -1376,6 +1646,73 @@ document.body.append(filePicker);
 $('#btn-attach').addEventListener('click', () => filePicker.click());
 $('#btn-empty-add').addEventListener('click', openAddContact);
 $('#btn-new-chat').addEventListener('click', openAddContact);
+$('#btn-new-group').addEventListener('click', openCreateGroup);
+
+// New group: name it, tick the goats (any connected contacts), invite them.
+// The relay stores plain membership; every message is still sealed per member.
+function openCreateGroup() {
+  if (!requireLogin()) return;
+  const nameInput = el('input', {
+    placeholder: 'The stable', maxlength: '60', spellcheck: 'true',
+    'aria-label': 'Group name',
+  });
+  const accepted = [...S.contacts.values()].filter((c) => c.state === 'accepted');
+  if (!accepted.length) {
+    openModal(modalShell('Start a group', null, el('p', { class: 'sub', text: 'Connect with at least one goat first — group chats seal every note to each member separately.' })));
+    return;
+  }
+  const picked = new Set();
+  const list = el('div', { class: 'picker-list group-pick' });
+  let pickedNote = el('p', { class: 'auth-hint', text: 'Pick the goats to invite.' });
+  const refreshNote = () => { pickedNote.textContent = picked.size ? `${picked.size} goat${picked.size > 1 ? 's' : ''} picked.` : 'Pick the goats to invite.'; };
+  for (const c of accepted) {
+    const uname = c.username.toLowerCase();
+    const row = el('button', { class: 'picker-row row-btn', type: 'button' });
+    const avatar = el('div', { class: 'avatar' });
+    D.paintAvatar(avatar, { name: c.displayName || uname, accent: c.accent, avatar: c.avatar });
+    const nameEl = el('div', { class: 'chat-name' });
+    nameEl.append(c.displayName || uname);
+    const badge = verifiedBadge(uname);
+    if (badge) nameEl.append(badge);
+    const check = el('span', { class: 'chip pick-state', text: '+' });
+    row.append(avatar, nameEl, check);
+    row.addEventListener('click', () => {
+      if (picked.has(uname)) picked.delete(uname);
+      else picked.add(uname);
+      row.classList.toggle('is-picked', picked.has(uname));
+      check.textContent = picked.has(uname) ? '✓' : '+';
+      refreshNote();
+      createBtn.disabled = !nameInput.value.trim() || picked.size < 1;
+    });
+    list.append(row);
+  }
+  const err = el('p', { class: 'auth-error', hidden: true });
+  const createBtn = el('button', { class: 'primary small', type: 'button', text: 'Create group', disabled: true });
+  createBtn.addEventListener('click', async () => {
+    createBtn.disabled = true;
+    busy(createBtn, 'Creating…');
+    err.hidden = true;
+    try {
+      const { group } = await S.api.createGroup(nameInput.value.trim(), [...picked]);
+      closeModal();
+      await openChat(`group:${group.id}`);
+    } catch (createErr) {
+      err.textContent = createErr.message || 'The relay could not create the group.';
+      err.hidden = false;
+      unbusy(createBtn);
+      createBtn.disabled = false;
+    }
+  });
+  nameInput.addEventListener('input', () => { createBtn.disabled = !nameInput.value.trim() || !picked.size; });
+  const body = el('div', {},
+    el('label', { class: 'field' }, el('span', { text: 'Group name' }), nameInput),
+    list, pickedNote, err,
+    el('div', { class: 'modal-actions' },
+      el('button', { class: 'ghost', type: 'button', text: 'Cancel', onclick: closeModal }),
+      createBtn));
+  openModal(modalShell('Start a group', 'Messages go to every member, sealed to each goat separately — the relay never sees plaintext.', body));
+  setTimeout(() => nameInput.focus(), 60);
+}
 
 filePicker.addEventListener('change', async () => {
   const file = filePicker.files?.[0];
@@ -1643,6 +1980,7 @@ function profileCard(user) {
 // Clicking the peer's name/avatar in a chat header opens their card.
 function openPeerProfile(peer) {
   const key = String(peer).toLowerCase();
+  if (isGroup(key)) return openGroupInfo();
   const rec = S.contacts.get(key);
   if (!rec) return;
   const card = profileCard({ ...rec, presence: isOnline(key) ? 'online' : 'offline' });
@@ -2042,6 +2380,52 @@ function aboutPane() {
       el('span', { class: 'chip', text: 'direct' })));
 }
 
+// Settings → Notifications. Sound always lives here; OS notifications use
+// Electron's Notification on desktop and the web Notification API in a tab.
+function notifyPane() {
+  const row = (label, small, control) => el('div', { class: 'row-item' },
+    el('div', { class: 'grow' }, el('div', { text: label }), el('small', { text: small })), control);
+  const toggle = (key, label, onFlip) => {
+    const btn = el('button', { class: 'ghost', type: 'button', text: S.notify[key] ? 'On' : 'Off' });
+    btn.onclick = async () => {
+      S.notify[key] = !S.notify[key];
+      btn.textContent = S.notify[key] ? 'On' : 'Off';
+      try { await S.vault?.setPref(key === 'sound' ? 'notifySound' : 'notifyDesktop', S.notify[key]); } catch {}
+      if (onFlip) onFlip();
+    };
+    return btn;
+  };
+
+  const webStatus = el('span', { class: 'chip', text: '' });
+  const refreshWeb = async () => {
+    if (!('Notification' in window)) { webStatus.textContent = 'not supported'; return; }
+    webStatus.textContent = Notification.permission === 'granted' ? 'granted'
+      : Notification.permission === 'denied' ? 'blocked in the browser' : 'not granted';
+  };
+  const webAsk = el('button', {
+    class: 'ghost', type: 'button', text: 'Enable',
+    onclick: async () => {
+      if ('Notification' in window) {
+        try { await Notification.requestPermission(); } catch {}
+        refreshWeb();
+      }
+    },
+  });
+  const isWeb = window.goat?.platform === 'web';
+  void refreshWeb();
+
+  return el('div', {},
+    row('Message sound', 'A clear chime for any message that lands while you are elsewhere (in-app or in another tab).', toggle('sound', 'Message sound')),
+    row('Desktop notifications', 'Shows the sender, the group (if any) and a preview; clicking it opens that chat.', toggle('desktop', 'Desktop notifications')),
+    isWeb
+      ? el('div', { class: 'row-item' },
+        el('div', { class: 'grow' }, el('div', { text: 'Browser permission' }),
+          el('small', { text: 'In a browser tab, notifications are gated by the browser itself.' })),
+        el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, webStatus, webAsk))
+      : null,
+    el('small', { class: 'net-hint', text: 'Nothing is sent when a notification shows — previews come from messages already decrypted on this device.' }));
+}
+
 function devPane() {
   const net = S.info.net || {};
   const reveal = (label, target) => el('div', { class: 'row-item' },
@@ -2076,6 +2460,7 @@ function openSettings(category = S.settingsCat || 'profile') {
     profile: profilePane,
     appearance: appearancePane,
     network: networkPane,
+    notify: notifyPane,
     privacy: privacyPane,
     about: aboutPane,
     ...(devUnlocked() ? { dev: devPane } : {}),
@@ -2104,6 +2489,7 @@ function openSettings(category = S.settingsCat || 'profile') {
     profile: ['Profile', 'users'],
     appearance: ['Appearance', 'smile'],
     network: ['Network', 'screen'],
+    notify: ['Notifications', 'bell'],
     privacy: ['Security', 'lock'],
     about: ['About', 'shield'],
     dev: ['Developer', 'clip'],
@@ -2641,6 +3027,14 @@ function wireStaticUi() {
 
   document.addEventListener('pointerdown', () => S.sound.ensure(), { once: true });
 
+  // Clicking a message notification opens that chat (window restore + focus
+  // steps happen in the main process first).
+  window.goat?.onNotifyClick?.((data) => {
+    const peer = String(data?.peer || '');
+    const reachable = S.contacts.get(peer)?.state === 'accepted' || S.groups.has(peer);
+    if (peer && reachable) openChat(peer).catch(() => {});
+  });
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && S.activePeer) {
       S.unread.set(S.activePeer, 0);
@@ -2897,6 +3291,9 @@ window.__gm = {
   safety: async (peer) => C.safetyNumber(C.publicBundle(S.identity), await peerBundle(peer)),
   contacts: () => [...S.contacts.values()].map((c) => ({ username: c.username, state: c.state })),
   activePeer: () => S.activePeer,
+  groups: () => [...S.groups.entries()].map(([key, g]) => ({ key, ...g })),
+  createGroup: async (name, members) => S.api.createGroup(name, members),
+  notifyPrefs: () => S.notify,
 };
 
 boot();

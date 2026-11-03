@@ -41,6 +41,14 @@ export class Sound {
     this.tone({ freq: 1180, dur: 0.13, gain: 0.042, type: 'sine', delay: 0.085 });
   }
 
+  // Unmistakable "you have a message" ding: bright two-note chime, louder
+  // than the in-chat blip, tuned so it cuts through a quiet room.
+  notify() {
+    this.tone({ freq: 1245, dur: 0.16, gain: 0.11, type: 'sine' });
+    this.tone({ freq: 1661, dur: 0.26, gain: 0.09, type: 'sine', delay: 0.12 });
+    this.tone({ freq: 2490, dur: 0.05, gain: 0.03, type: 'sine', delay: 0.13 });
+  }
+
   incoming() {
     this.tone({ freq: 760, dur: 0.18, gain: 0.05, type: 'triangle' });
     this.tone({ freq: 950, dur: 0.2, gain: 0.045, type: 'triangle', delay: 0.19 });
