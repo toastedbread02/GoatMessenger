@@ -90,6 +90,7 @@
             <span>I agree to the <a href="https://toastedbread02.github.io/GoatMessenger/terms.html" target="_blank" rel="noopener">Terms of service</a> and the <a href="https://toastedbread02.github.io/GoatMessenger/privacy.html" target="_blank" rel="noopener">Privacy policy</a></span>
           </label>
         </div>
+        <p class="captcha-label" id="captcha-label" hidden>Robot check: confirm you're not a bot</p>
         <div class="field-captcha" id="field-captcha" hidden></div>
         <div id="captcha-hidden" class="field-captcha-hidden" aria-hidden="true"></div>
         <p class="auth-hint" id="auth-hint">Your passphrase unlocks your private keys. It is never sent to the relay.</p>
@@ -97,6 +98,13 @@
         <button class="ghost auth-guest" id="btn-guest" type="button">🐐 Continue as guest</button>
         <p class="auth-guest-hint">Guests can chat — screen sharing, camera and files need a full account.</p>
         <p class="auth-error" id="auth-error" hidden></p>
+        <div class="auth-alt" id="auth-alt" hidden>
+          <label class="auth-alt-label" for="auth-alt-input">Sign in on another relay instead</label>
+          <div class="auth-alt-row">
+            <input id="auth-alt-input" type="url" placeholder="https://your-relay.example" autocomplete="off" spellcheck="false">
+            <button class="ghost" id="auth-alt-go" type="button">Use relay</button>
+          </div>
+        </div>
       </form>
       <div class="auth-meta">
         <span id="relay-label">relay —</span>

@@ -194,16 +194,22 @@ function setAuthMode(mode) {
   $('#field-consent').hidden = !isSignup;
   $('#field-captcha').hidden = !(isSignup && CAPTCHA.siteKey);
   $('#auth-submit').textContent = isSignup ? 'Create my herd' : 'Sign in';
-  if (isSignup && CAPTCHA.siteKey) mountCaptcha();
+  if (isSignup && CAPTCHA.siteKey) {
+    $('#captcha-label').hidden = false;
+    mountCaptcha();
+  } else $('#captcha-label').hidden = true;
   $('#auth-hint').textContent = isSignup
     ? 'Your passphrase derives your private keys on this device. The relay only ever sees ciphertext.'
     : 'Your passphrase unlocks your keys and your history. It never leaves this device.';
   $('#auth-error').hidden = true;
+  const alt = $('#auth-alt');
+  if (alt) alt.hidden = true;
 }
 
-function authError(message) {
+function authError(message, extra) {
+  const hint = !extra ? '' : `\n${extra}`;
   const node = $('#auth-error');
-  node.textContent = message;
+  node.textContent = message + hint;
   node.hidden = false;
 }
 
@@ -3145,10 +3151,38 @@ $('#btn-call-code').addEventListener('click', () => {
   node.hidden = !node.hidden;
 });
 
-/* ==================================================================== wiring */
+/* ------------------------------------------------------------------ wiring */
+
+/** Credentials of the last failed sign-in, kept only to let the rescue box retry
+    them on another relay; cleared the moment they work or the user retypes. */
+let altSignIn = null;
 
 function wireStaticUi() {
   D.$$('.tab').forEach((tab) => tab.addEventListener('click', () => setAuthMode(tab.dataset.mode)));
+
+  // Failed sign-in rescue: point the session at the relay the account was
+  // actually made on, then retry immediately with the credentials kept above.
+  $('#auth-alt-go').addEventListener('click', async () => {
+    if (!altSignIn) return;
+    const button = $('#auth-alt-go');
+    const raw = $('#auth-alt-input').value.trim().replace(/\/$/, '');
+    $('#auth-error').hidden = true;
+    busy(button, 'Switching…');
+    try {
+      const set = await window.goat.net.set({ relayUrl: raw });
+      if (!set.ok) throw new Error(set.error || 'No relay answering there.');
+      await adoptRelay({ relayUrl: raw }, $('#relay-warning'));
+      await signIn(altSignIn.username, altSignIn.pass);
+      altSignIn = null;
+      $('#auth-alt').hidden = true;
+      $('#auth-error').hidden = true;
+      toast('Signed in.');
+    } catch (err) {
+      authError(err.message || 'Sign-in on that relay failed.');
+    } finally {
+      unbusy(button);
+    }
+  });
 
   $('#auth-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -3174,7 +3208,20 @@ function wireStaticUi() {
         toast('Signed in.');
       }
     } catch (err) {
-      authError(err.message || 'Something went wrong.');
+      const message = err.message || 'Something went wrong.';
+      if (S.authMode !== 'signup' && /incorrect name or passphrase/i.test(message)) {
+        // The relay rejected the login. The most common cause: the account lives
+        // on a different relay (sign-ups are per-relay). Offer the one-field fix.
+        altSignIn = { username, pass };
+        const box = $('#auth-alt');
+        if (box) {
+          $('#auth-alt-input').value = S.info.relayUrl;
+          box.hidden = false;
+        }
+        authError(`${message}\n\nAccounts live on the relay they were made on. This relay is ${S.info.relayUrl} — if you created this goat elsewhere, sign in on that relay below.`);
+      } else {
+        authError(message);
+      }
     } finally {
       unbusy(button);
     }
