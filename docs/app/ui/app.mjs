@@ -192,7 +192,9 @@ function setAuthMode(mode) {
   $('#field-display').hidden = !isSignup;
   $('#field-pass2').hidden = !isSignup;
   $('#field-consent').hidden = !isSignup;
+  $('#field-captcha').hidden = !(isSignup && CAPTCHA.siteKey);
   $('#auth-submit').textContent = isSignup ? 'Create my herd' : 'Sign in';
+  if (isSignup && CAPTCHA.siteKey) mountCaptcha();
   $('#auth-hint').textContent = isSignup
     ? 'Your passphrase derives your private keys on this device. The relay only ever sees ciphertext.'
     : 'Your passphrase unlocks your keys and your history. It never leaves this device.';
@@ -203,6 +205,104 @@ function authError(message) {
   const node = $('#auth-error');
   node.textContent = message;
   node.hidden = false;
+}
+
+/* -------------------------------------------------------------- robot check */
+// Cloudflare Turnstile on the create-account tab (and console-quiet on guest
+// signups). The relay publishes its site key on /api/captcha; with the shipped
+// demo key the widget is truly passive, and when the operator sets real keys
+// the relay verifies every token server-side before creating the account.
+const CAPTCHA = { siteKey: null, strict: false, scriptReady: null, visible: null, hidden: null, mounted: false };
+
+function loadCaptchaScript() {
+  if (CAPTCHA.scriptReady) return CAPTCHA.scriptReady;
+  if (window.turnstile) { CAPTCHA.scriptReady = Promise.resolve(); return CAPTCHA.scriptReady; }
+  CAPTCHA.scriptReady = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.id = 'cf-turnstile-script';
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Could not load the robot check.'));
+    document.head.appendChild(script);
+  });
+  return CAPTCHA.scriptReady;
+}
+
+async function initCaptcha() {
+  try {
+    const info = await S.api.request('/api/captcha');
+    if (!info || !info.siteKey) return;
+    CAPTCHA.siteKey = info.siteKey;
+    CAPTCHA.strict = Boolean(info.strict);
+    if (S.authMode === 'signup') {
+      $('#field-captcha').hidden = false;
+      void mountCaptcha();
+    }
+  } catch { /* relay without the route or offline — skip the widget */ }
+}
+
+// Visible widget inside the create-account form.
+async function mountCaptcha() {
+  if (!CAPTCHA.siteKey || CAPTCHA.mounted) return;
+  try {
+    await loadCaptchaScript().catch(() => {});
+    if (!window.turnstile) return; // offline / CDN blocked — signup still works via proof of work
+    $('#field-captcha').innerHTML = '';
+    CAPTCHA.visible = window.turnstile.render($('#field-captcha'), {
+      sitekey: CAPTCHA.siteKey,
+      action: 'signup',
+      appearance: 'always',
+    });
+    CAPTCHA.mounted = true;
+  } catch { /* stay passive */ }
+}
+
+// Token from the visible widget for the create-account submit.
+async function signupCaptchaToken() {
+  if (!CAPTCHA.siteKey) return null;
+  if (!CAPTCHA.strict) return null; // the relay enforces nothing on demo keys; keep offline signups possible
+  try {
+    await loadCaptchaScript();
+    await mountCaptcha();
+    const response = CAPTCHA.visible != null ? window.turnstile.getResponse(CAPTCHA.visible) : '';
+    if (response) return response;
+    // Managed widgets sometimes need a nudge to start evaluating.
+    window.turnstile.execute(CAPTCHA.visible);
+    const started = Date.now();
+    while (Date.now() - started < 12000) {
+      const token = window.turnstile.getResponse(CAPTCHA.visible);
+      if (token) return token;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  } catch { /* fall through */ }
+  throw new Error('Please finish the robot check before continuing.');
+}
+
+// An off-screen widget executed when a guest session starts silently.
+async function guestCaptchaToken() {
+  if (!CAPTCHA.siteKey || !CAPTCHA.strict) return null;
+  try {
+    await loadCaptchaScript();
+    if (!window.turnstile) return null;
+    if (!CAPTCHA.hidden) {
+      CAPTCHA.hidden = window.turnstile.render($('#captcha-hidden'), {
+        sitekey: CAPTCHA.siteKey,
+        action: 'guest',
+        appearance: 'interaction-only',
+      });
+    }
+    return await new Promise((resolve) => {
+      let done = false;
+      const finish = (value) => { if (!done) { done = true; resolve(value); } };
+      setTimeout(() => finish(null), 10000);
+      window.turnstile.execute(CAPTCHA.hidden, {
+        callback: (token) => finish(token || null),
+        errorCallback: () => finish(null),
+        expiredCallback: () => finish(null),
+      });
+    });
+  } catch { return null; }
 }
 
 // Guests are throwaway relay accounts the app creates silently. They can chat
@@ -217,11 +317,12 @@ function requireLogin() {
 }
 
 async function continueAsGuest() {
+  const captchaToken = await guestCaptchaToken();
   for (let attempt = 0; attempt < 6; attempt++) {
     const name = `guest_${D.randomId(4)}`;
     const passphrase = D.randomId(16);
     try {
-      await signUp(name, passphrase, 'Guest');
+      await signUp(name, passphrase, 'Guest', captchaToken);
       toast('Chatting as a guest — create an account for everything.');
       return;
     } catch (err) {
@@ -258,7 +359,7 @@ async function signIn(username, passphrase) {
   return res;
 }
 
-async function signUp(username, passphrase, displayNameValue) {
+async function signUp(username, passphrase, displayNameValue, captchaToken) {
   const name = username.trim();
   if (!/^[a-zA-Z0-9_]{3,24}$/.test(name)) throw new Error('Use 3–24 letters, numbers or underscores.');
   if (passphrase.length < 8) throw new Error('Please use at least 8 characters for your passphrase.');
@@ -271,6 +372,7 @@ async function signUp(username, passphrase, displayNameValue) {
     authToken: keys.authToken,
     identityBackup: backup,
     keys: C.publicBundle(identity),
+    ...(captchaToken ? { turnstile: captchaToken } : {}),
     ...(pow ? { pow } : {}),
   });
   let res;
@@ -2191,98 +2293,9 @@ function pickImage(kind) {
   });
 }
 
-// Relay + TURN: the two addresses that let two goats in different countries
-// reach each other. Messages ride the relay (ciphertext only); calls use TURN.
-function netBlock() {
-  const net = S.info.net || {};
-  const relayInput = el('input', {
-    value: net.relayUrl || '',
-    placeholder: 'http://203.0.113.10:4040',
-    spellcheck: 'false',
-  });
-  const turnInput = el('input', {
-    value: net.turn?.urls || '',
-    placeholder: 'turn:203.0.113.10:3478?transport=udp',
-    spellcheck: 'false',
-  });
-  const userInput = el('input', { value: net.turn?.username || '', placeholder: 'goat', spellcheck: 'false' });
-  const passInput = el('input', { type: 'password', value: net.turn?.credential || '', placeholder: 'password' });
-  const forceBox = el('input', { type: 'checkbox' });
-  forceBox.checked = Boolean(net.forceRelay);
-  const status = el('div', {
-    class: 'net-status',
-    text: net.embedded ? 'Using the relay inside this Mac.' : `Using ${net.relayUrl}.`,
-  });
-
-  const apply = el('button', {
-    class: 'primary small',
-    type: 'button',
-    text: 'Apply',
-    onclick: async () => {
-      apply.disabled = true;
-      status.textContent = 'Checking the relay…';
-      status.className = 'net-status';
-      try {
-        const res = await window.goat.net.set({
-          relayUrl: relayInput.value,
-          turn: { urls: turnInput.value, username: userInput.value, credential: passInput.value },
-          forceRelay: forceBox.checked,
-        });
-        if (!res.ok) {
-          status.textContent = res.error;
-          status.className = 'net-status bad';
-          return;
-        }
-        S.info.net = { ...(S.info.net || {}), ...res.net };
-        S.calls?.setNetwork({ turn: res.net.turn, forceRelay: res.net.forceRelay });
-        status.textContent = res.restartNeeded
-          ? 'Saved. Quit and reopen GoatMessenger to switch relays.'
-          : 'Saved. Calls will use these settings now.';
-        status.className = 'net-status good';
-      } catch (err) {
-        status.textContent = err.message;
-        status.className = 'net-status bad';
-      } finally {
-        apply.disabled = false;
-      }
-    },
-  });
-
-  const test = el('button', {
-    class: 'ghost',
-    type: 'button',
-    text: 'Test',
-    onclick: async () => {
-      status.textContent = 'Testing…';
-      status.className = 'net-status';
-      const res = await window.goat.net.test(relayInput.value);
-      status.textContent = res.ok
-        ? `Relay answered in ${res.ms} ms${res.turn ? ' · TURN enabled' : ''}`
-        : res.error;
-      status.className = `net-status ${res.ok ? 'good' : 'bad'}`;
-    },
-  });
-
-  return el('div', { class: 'net-block' },
-    el('div', { class: 'net-head' },
-      icon('users'),
-      el('div', {},
-        el('div', { text: 'Relay & calls across the world' }),
-        el('small', { text: 'Point both goats at the same relay and TURN server' }))),
-    el('label', { class: 'field' }, el('span', { text: 'Relay address (blank = this Mac)' }), relayInput),
-    el('label', { class: 'field' }, el('span', { text: 'TURN server' }), turnInput),
-    el('div', { class: 'field-row' },
-      el('label', { class: 'field' }, el('span', { text: 'TURN username' }), userInput),
-      el('label', { class: 'field' }, el('span', { text: 'TURN password' }), passInput)),
-    el('label', { class: 'check-row' }, forceBox, el('span', { text: 'Force calls through TURN (best across strict networks)' })),
-    el('div', { class: 'net-actions' }, status, test, apply),
-    el('small', { class: 'net-hint', text: 'Messages and calls stay end-to-end encrypted — the relay only ever forwards ciphertext.' }));
-}
-
-const DEV_FLAG = 'gm:devMode';
-function devUnlocked() {
-  try { return localStorage.getItem(DEV_FLAG) === '1'; } catch { return false; }
-}
+// Relay + TURN are configured by the relay operator (env vars) — there is no
+// user-facing Network pane anymore: everyone connects to the public herd relay
+// by default, and tests/advanced setups override it with GM_SERVER.
 
 function themePicker() {
   const modes = [
@@ -2546,11 +2559,6 @@ function storagePane() {
     el('small', { class: 'net-hint', text: 'Want everything gone? Security → “Clear local history” wipes notes and ratchets for good.' }));
 }
 
-function networkPane() {
-  return el('div', {}, netBlock(),
-    el('small', { class: 'net-hint', text: 'Keep both goats pointed at the same relay so messages flow between them.' }));
-}
-
 function privacyPane() {
   const fingerprint = C.fingerprintKey(S.identity.ikPub).match(/.{1,4}/g).join(' ');
   return el('div', {},
@@ -2577,28 +2585,9 @@ function privacyPane() {
 }
 
 function aboutPane() {
-  let pokes = 0;
-  let pokeTimer = null;
-  const versionBtn = el('button', {
-    class: 'row-item row-btn',
-    type: 'button',
-    title: 'Version',
-    onclick: () => {
-      pokes += 1;
-      clearTimeout(pokeTimer);
-      pokeTimer = setTimeout(() => { pokes = 0; }, 2200);
-      if (pokes >= 5) {
-        pokes = 0;
-        try { localStorage.setItem(DEV_FLAG, '1'); } catch {}
-        toast('Developer mode unlocked 🐐');
-        openSettings('dev');
-      } else if (pokes >= 3) {
-        toast(`${5 - pokes} more taps for developer mode…`);
-      }
-    },
-  },
-  el('div', { class: 'grow' }, el('div', { text: 'GoatMessenger' }), el('small', { text: 'An end-to-end encrypted messenger for goats' })),
-  el('span', { class: 'chip', text: `version ${S.info.version}` }));
+  const versionBtn = el('div', { class: 'row-item' },
+    el('div', { class: 'grow' }, el('div', { text: 'GoatMessenger' }), el('small', { text: 'An end-to-end encrypted messenger for goats' })),
+    el('span', { class: 'chip', text: `version ${S.info.version}` }));
 
   return el('div', {},
     versionBtn,
@@ -2656,45 +2645,14 @@ function notifyPane() {
     el('small', { class: 'net-hint', text: 'Nothing is sent when a notification shows — previews come from messages already decrypted on this device.' }));
 }
 
-function devPane() {
-  const net = S.info.net || {};
-  const reveal = (label, target) => el('div', { class: 'row-item' },
-    el('div', { class: 'grow' }, el('div', { text: label }), el('small', { text: target || '—' })),
-    el('button', { class: 'ghost', text: 'Reveal', onclick: () => window.goat?.revealPath?.(target) }));
-  return el('div', {},
-    el('div', { class: 'row-item' },
-      el('div', { class: 'grow' }, el('div', { text: 'Relay in use' }), el('small', { text: S.api.url || '—' })),
-      el('span', { class: 'chip', text: net.embedded ? 'embedded' : 'external' })),
-    el('div', { class: 'row-item' },
-      el('div', { class: 'grow' }, el('div', { text: 'Relay address (configured)' }), el('small', { text: net.relayUrl || '(none — local relay)' })),
-      el('span', { class: 'chip', text: 'settings' })),
-    el('div', { class: 'row-item' },
-      el('div', { class: 'grow' }, el('div', { text: 'TURN' }),
-        el('small', { text: net.turn?.urls || 'none — calls go peer-to-peer' })),
-      el('span', { class: 'chip', text: net.turnPort ? `port ${net.turnPort}` : 'no turn' })),
-    reveal('Data directory', S.info.userData),
-    reveal('Boot log', `${S.info.userData}/boot.log`),
-    el('div', { class: 'row-item' },
-      el('div', { class: 'grow' }, el('div', { text: 'Second window' }), el('small', { text: 'Sign in as another goat to test calls and shares' })),
-      el('button', { class: 'ghost', text: 'Open', onclick: () => window.goat?.newWindow?.() })),
-    el('div', { class: 'row-item' },
-      el('div', { class: 'grow' }, el('div', { text: 'Test flags' })),
-      el('div', { class: 'dev-chips', style: { display: 'flex', gap: '6px' } },
-        el('span', { class: 'chip tiny', text: S.info.e2e ? 'e2e' : 'no e2e' }),
-        el('span', { class: 'chip tiny', text: S.info.fakeMedia ? 'fake media' : 'real media' }))),
-    el('small', { class: 'net-hint', text: 'Developer tools for poking at relays, TURN and diagnostics. Unlock: About → tap the version 5 times.' }));
-}
-
 function openSettings(category = S.settingsCat || 'profile') {
   const panes = {
     profile: profilePane,
     appearance: appearancePane,
     storage: storagePane,
-    network: networkPane,
     notify: notifyPane,
     privacy: privacyPane,
     about: aboutPane,
-    ...(devUnlocked() ? { dev: devPane } : {}),
   };
   if (!panes[category]) category = 'profile';
   S.settingsCat = category;
@@ -2720,11 +2678,9 @@ function openSettings(category = S.settingsCat || 'profile') {
     profile: ['Profile', 'users'],
     appearance: ['Appearance', 'smile'],
     storage: ['Storage', 'download'],
-    network: ['Network', 'screen'],
     notify: ['Notifications', 'bell'],
     privacy: ['Security', 'lock'],
     about: ['About', 'shield'],
-    dev: ['Developer', 'clip'],
   };
   const side = el('div', { class: 'settings-side' });
   for (const id of Object.keys(panes)) {
@@ -3210,7 +3166,8 @@ function wireStaticUi() {
         if (!$('#auth-age').checked || !$('#auth-terms').checked) {
           throw new Error('Please confirm your age and accept the Terms & Privacy policy to continue.');
         }
-        await signUp(username, pass, $('#auth-display').value);
+        const captchaToken = await signupCaptchaToken();
+        await signUp(username, pass, $('#auth-display').value, captchaToken);
         toast('Welcome to the herd.');
       } else {
         await signIn(username, pass);
@@ -3393,6 +3350,7 @@ async function boot() {
   showBootNote(healthy ? 'Ready.' : 'Relay not reachable — start it with npm run server.');
   if (!healthy) showRelayWarning(S.info.relayError || `No relay answering at ${S.info.relayUrl}.`);
 
+  void initCaptcha(); // load the robot check while the sign-in screen shows
   await tryRestoreSession();
 
   setTimeout(() => {

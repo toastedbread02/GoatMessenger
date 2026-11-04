@@ -70,7 +70,8 @@ class Session {
         if (msg.params.type === 'error') this.errors.push(text);
       }
       if (msg.method === 'Log.entryAdded' && msg.params.entry.level === 'error') {
-        this.errors.push(msg.params.entry.text);
+        const e = msg.params.entry;
+        this.errors.push(e.url ? `${e.text} (${e.url})` : e.text);
       }
     });
   }

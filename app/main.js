@@ -78,6 +78,10 @@ function serveProtocol(ses) {
 
 /* ------------------------------------------------------------------- relay -- */
 
+// The public relay lives on Deno Deploy (free, cardless, durable, KV storage);
+// see README’s “Hosting the relay in the cloud”. Override it with GM_SERVER.
+const PUBLIC_RELAY = 'https://goatmessenger.toastedbread02.deno.net';
+
 let relay = null;
 let relayUrl = process.env.GM_SERVER || null;
 let relayError = null;
@@ -173,6 +177,16 @@ async function ensureRelay() {
     relayUrl = process.env.GM_SERVER.replace(/\/$/, '');
     const ok = await healthCheck(relayUrl);
     if (!ok) throw new Error(`No GoatMessenger relay answering at ${relayUrl}`);
+    return relayUrl;
+  }
+  // The public herd relay is the built-in default: anyone who installs the app
+  // is connected to it automatically, so accounts reach each other across the
+  // internet with zero configuration. Works purely as a pass-through of
+  // ciphertext; the embedded/local relay below remains the offline fallback. //
+  if (!process.env.GM_E2E && !process.env.GM_NO_PUBLIC
+      && await healthCheck(PUBLIC_RELAY)) {
+    relayUrl = PUBLIC_RELAY;
+    bootLog('using public relay', relayUrl);
     return relayUrl;
   }
   // A relay the user configured (another machine, a VPS, a tunnel).

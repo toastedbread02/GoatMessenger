@@ -16,7 +16,7 @@
     console.error('[goat-web] GoatMessenger needs a secure context (https or localhost).');
   }
 
-  const DEFAULT_RELAY = 'https://epilogue-exquisite-press.ngrok-free.dev';
+  const DEFAULT_RELAY = 'https://goatmessenger.toastedbread02.deno.net';
   const params = new URLSearchParams(location.search);
   // Each browser-tab "window" gets its own stored session so two tabs can hold
   // two different accounts, like the desktop app's second window.

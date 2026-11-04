@@ -11,6 +11,22 @@ const crypto = require('crypto');
 const { URL } = require('url');
 const { WebSocketServer } = require('ws');
 const { Store, openStore } = require('./store');
+
+/* -------------------------------------------------------------- turnstile -- */
+// Cloudflare's robot check on sign-ups (https://developers.cloudflare.com/turnstile/).
+// Shipped configured with Cloudflare's published test keys — the widget shows,
+// one click, always passes — so every relay displays it out of the box with no
+// account needed. A relay operator who wants real enforcement sets
+// TURNSTILE_SITE_KEY + TURNSTILE_SECRET_KEY in the environment; the relay then
+// verifies every signup token against Cloudflare's siteverify API and rejects
+// signups without a valid one. (The signup proof-of-work stays the always-on
+// fallback so loops of requests still cost the bot real CPU.)
+const CAPTCHA_VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+const CAPTCHA = {
+  siteKey: process.env.TURNSTILE_SITE_KEY || '1x00000000000000000000AA',
+  secret: process.env.TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA',
+  strict: Boolean(process.env.TURNSTILE_SITE_KEY && process.env.TURNSTILE_SECRET_KEY),
+};
 // TURN is only needed when the operator opts into UDP relaying, and importing
 // it pulls in `node:dgram` — which would break runtime hosts (Deno Deploy)
 // that have no UDP sockets even when TURN is switched off.
@@ -198,7 +214,30 @@ function createGoatServer({
     powSeen.add(key);
     return null;
   };
-  const powRequired = (ip) => POW_MODE === 'always' || (POW_MODE === 'public' && !isLoopbackIp(ip));
+    /** Cloudflare Turnstile: null when acceptable, else an error message.
+     * Strict (real keys) means the token is mandatory and verified remotely;
+     * test keys (the shipped default) are cosmetic — the proof of work still
+     * gates the actual flood. */
+    const captchaVerify = async (token) => {
+      if (!CAPTCHA.strict) return null; // demo keys: the widget is informal
+      if (!token || typeof token !== 'string' || token.length < 10) {
+        return 'The robot check did not complete. Please try again.';
+      }
+      try {
+        const body = new URLSearchParams({ secret: CAPTCHA.secret, response: token }).toString();
+        const verdict = await (await fetch(CAPTCHA_VERIFY_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body,
+        })).json();
+        if (verdict && verdict.success) return null;
+      } catch (err) {
+        console.error('[captcha] siteverify unreachable:', err.message);
+        return 'The robot check could not be verified. Please try again.';
+      }
+      return 'The robot check failed or expired. Please try again.';
+    };
+    const powRequired = (ip) => POW_MODE === 'always' || (POW_MODE === 'public' && !isLoopbackIp(ip));
 
   /** username -> Set<WebSocket> */
   const sockets = new Map();
@@ -319,6 +358,12 @@ function createGoatServer({
         });
       }
 
+      // Cloudflare Turnstile site key so clients can render the robot check
+      // before submitting a signup.
+      if (route === '/api/captcha' && req.method === 'GET') {
+        return json(res, 200, { siteKey: CAPTCHA.siteKey, strict: CAPTCHA.strict });
+      }
+
       // Proof-of-work challenge for signups (see powVerify below). Supply the
       // intended username so the challenge binds to it.
       if (route === '/api/pow' && req.method === 'GET') {
@@ -346,6 +391,12 @@ function createGoatServer({
           // mass registrations out without any third-party captcha.
           const verdict = powVerify(ip, username, body.pow);
           if (verdict) return sendJson(res, 428, { ...verdict });
+        }
+        if (CAPTCHA.strict) {
+          const captchaError = await captchaVerify(body.turnstile);
+          if (captchaError) return fail(res, 403, captchaError);
+        } else if (body.turnstile && typeof body.turnstile === 'string' && body.turnstile.length > 100000) {
+          return fail(res, 400, 'Bad captcha token.');
         }
         if (store.user(username)) return fail(res, 409, 'That name is already taken.');
         if (typeof body.authToken !== 'string' || body.authToken.length < 32) return fail(res, 400, 'Weak auth token.');

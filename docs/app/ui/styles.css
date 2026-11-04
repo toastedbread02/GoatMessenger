@@ -208,7 +208,19 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); text-align: center;
 }
 
-/* consent: age + terms checkboxes shown on the create-account tab only */
+/* consent: age + terms checkboxes shown on the create-account tab only, with
+   the Cloudflare robot check just below */
+.field-captcha {
+  margin: 2px 0 6px;
+}
+.field-captcha iframe {
+  border-radius: 8px;
+}
+.field-captcha-hidden {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
 .auth-consents { margin: 2px 0 6px; }
 .auth-consents .check-row input { margin-top: 1px; flex: none; }
 .auth-consents a { color: var(--camel-deep); font-weight: 600; }

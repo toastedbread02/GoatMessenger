@@ -3,7 +3,7 @@
   <meta charset="utf-8">
 <title>GoatMessenger</title>
 <meta name="color-scheme" content="light dark">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* http://*:* ws://*:*; font-src 'self' data:; object-src 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* http://*:* ws://*:* https: wss:; font-src 'self' data:; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'">
 <link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="stylesheet" href="ui/styles.css">
 </head>
@@ -90,6 +90,8 @@
             <span>I agree to the <a href="https://toastedbread02.github.io/GoatMessenger/terms.html" target="_blank" rel="noopener">Terms of service</a> and the <a href="https://toastedbread02.github.io/GoatMessenger/privacy.html" target="_blank" rel="noopener">Privacy policy</a></span>
           </label>
         </div>
+        <div class="field-captcha" id="field-captcha" hidden></div>
+        <div id="captcha-hidden" class="field-captcha-hidden" aria-hidden="true"></div>
         <p class="auth-hint" id="auth-hint">Your passphrase unlocks your private keys. It is never sent to the relay.</p>
         <button class="primary" id="auth-submit" type="submit">Sign in</button>
         <button class="ghost auth-guest" id="btn-guest" type="button">🐐 Continue as guest</button>
