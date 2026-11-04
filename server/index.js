@@ -117,8 +117,17 @@ function createGoatServer({
   pow = null,       // 'public' (default) | 'always' | 'off' — signup proof-of-work mode
 } = {}) {
   const storeReady = openStore(dataDir); // Promise<Store> — fs on Node, Deno KV on Deploy
-  const filesDir = path.join(dataDir, 'files');
-  fs.mkdirSync(filesDir, { recursive: true });
+  // Attachments are written to disk only in fs-store mode; in KV mode they
+  // live in the database. On a read-only data dir (Deno Deploy) fall back to
+  // the instance's temp directory so boot never crashes.
+  let filesDir = path.join(dataDir, 'files');
+  try {
+    fs.mkdirSync(filesDir, { recursive: true });
+  } catch (err) {
+    if (!['EACCES', 'EROFS', 'EPERM'].includes(err.code)) throw err;
+    filesDir = path.join(require('os').tmpdir(), 'goatmessenger-files');
+    fs.mkdirSync(filesDir, { recursive: true });
+  }
   // Assigned once the store finishes loading. Every consumer awaits `boot()`
   // before its first synchronous read; helpers below close over the binding,
   // so they see the loaded store wherever they run.

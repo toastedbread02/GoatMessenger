@@ -3,7 +3,9 @@
   "unstable": ["kv"],
   "deploy": {
     "install": "npm install --omit=dev",
+    "build": "echo goatmessenger: no build step needed",
     "runtime": {
+      "type": "dynamic",
       "entrypoint": "server/index.js"
     }
   }
