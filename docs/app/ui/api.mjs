@@ -1,4 +1,6 @@
 // HTTP + WebSocket client for the relay.
+import { solveProofOfWork } from '../shared/pow.mjs';
+
 export class ApiError extends Error {
   constructor(message, status, data) {
     super(message);
@@ -24,7 +26,7 @@ export class Api {
 
   setToken(token) { this.token = token; }
 
-  async request(path, { method = 'GET', body, raw, headers = {}, timeout = 25000 } = {}) {
+  async request(path, { method = 'GET', body, raw, headers = {}, timeout = 25000, retryNetwork = 0 } = {}) {
     const init = {
       method,
       headers: {
@@ -44,6 +46,13 @@ export class Api {
     try {
       res = await fetch(this.base + path, init);
     } catch (err) {
+      // A reused keep-alive socket can be closed by the relay or an intermediary
+      // at the exact moment we send on it. One retry on a fresh connection is
+      // the standard fix; only opt-in callers ask for it.
+      if (retryNetwork > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return this.request(path, { method, body, raw, headers, timeout, retryNetwork: retryNetwork - 1 });
+      }
       throw new ApiError('Cannot reach the relay. Is it running?', 0);
     }
     const type = res.headers.get('content-type') || '';
@@ -86,6 +95,35 @@ export class Api {
     });
   }
   download(fileId) { return this.request(`/api/file/${fileId}`, { timeout: 120000 }); }
+
+  /* ------------------------------------------------------------- migration -- */
+
+  /** Everything needed to stand this account up on another relay. */
+  exportAccount() { return this.request('/api/export', { method: 'POST', body: {}, timeout: 60000, retryNetwork: 1 }); }
+
+  /** Copies a bundle onto this relay. Public relays demand the same proof of
+      work as a signup, delivered with a 428 the first time round. */
+  async importAccount(bundle) {
+    const name = String(bundle?.account?.username || '');
+    const attempt = (pow) => this.request('/api/import', {
+      method: 'POST',
+      body: { bundle, ...(pow ? { pow } : {}) },
+      timeout: 120000,
+      retryNetwork: 1,
+    });
+    try {
+      return await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // Already here — from an earlier attempt that landed but whose reply was
+        // lost. The sign-in that follows is the real check.
+        return { ok: true, alreadyThere: true, username: name, imported: {} };
+      }
+      if (!(err instanceof ApiError) || err.status !== 428 || !err.data?.challenge) throw err;
+      const nonce = await solveProofOfWork(err.data.bits || 16, err.data.challenge, name);
+      return attempt({ challenge: err.data.challenge, nonce });
+    }
+  }
 
   /* ------------------------------------------------------------- websocket -- */
 

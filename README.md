@@ -220,10 +220,17 @@ counter reports the forwarded packets.
 
 ## Limits worth knowing
 
-- Conversations are one-to-one; there are no group threads yet.
-- The Windows build ships unsigned (no code-signing certificate in this repo) and is tested
-  on a Mac only at the packaging level — run it on a real Windows machine before distributing
-  it.
+- Group threads hold up to 32 goats; each delivery is still sealed per member over
+  pairwise ratchets.
+- Builds are code-signed before they ship (`npm run sign`): ad-hoc on macOS, Authenticode with
+  the project's self-signed certificate on Windows. Neither is backed by a paid Apple or
+  Microsoft certificate, so both systems still warn the first time. The Windows build is
+  tested on a Mac only at the packaging level — run it on a real Windows machine before
+  distributing it.
+- An account belongs to one relay, but it can move: `POST /api/export` on the relay that has
+  it, `POST /api/import` on the relay that should have it — or the “Move my account to this
+  relay” link on the sign-in screen. Contacts, groups and ciphertext history travel with it.
+  `npm run migrate -- --to https://relay.example` lifts a whole local store in one go.
 - Calls prefer a direct peer-to-peer route (LAN, or NAT traversal via STUN) and fall back to
   the bundled TURN relay across strict NATs. Relay media is still DTLS-SRTP end to end.
 - A server-side key backup lets you sign in on another Mac, but that Mac starts a fresh

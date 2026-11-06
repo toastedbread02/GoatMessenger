@@ -41,12 +41,15 @@
     "test:server": "node scripts/test-server.js",
     "test:e2ee": "node scripts/test-e2ee.js",
     "test:turn": "electron scripts/test-turn.js",
-    "test": "npm run test:crypto && npm run test:server && npm run test:e2ee && npm run test:turn",
+    "test": "npm run test:crypto && npm run test:server && npm run test:migrate && npm run test:e2ee && npm run test:turn",
+    "test:migrate": "node scripts/test-migrate.js",
     "e2e": "node scripts/e2e.js",
     "package": "node scripts/package.js",
     "package:win": "node scripts/package-win.js",
     "package:win-portable": "npm run icon && electron-builder --win portable --x64",
-    "icon": "electron scripts/make-icon.js"
+    "icon": "electron scripts/make-icon.js",
+    "sign": "node scripts/sign-apps.js",
+    "migrate": "node scripts/migrate-relay.js"
   },
   "dependencies": {
     "@noble/curves": "^1.9.1",

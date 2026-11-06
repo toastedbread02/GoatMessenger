@@ -36,6 +36,9 @@ try { createTurnServer = require('./turn').createTurnServer; } catch (err) {
 }
 
 const MAX_JSON = 2200 * 1024;
+// Account migration carries a whole history in one body, so it gets its own
+// (still bounded) ceiling.
+const MAX_IMPORT = 8 * 1024 * 1024;
 const MAX_UPLOAD = 50 * 1024 * 1024;
 // On backends where attachments live inside the storage engine (Deno Deploy's
 // KV) uploads are capped tighter so one file can never eat the whole quota's
@@ -77,14 +80,42 @@ function readBody(req, limit) {
   });
 }
 
-async function readJson(req) {
-  const buf = await readBody(req, MAX_JSON);
+async function readJson(req, limit = MAX_JSON) {
+  const buf = await readBody(req, limit);
   if (!buf.length) return {};
   try {
     return JSON.parse(buf.toString('utf8'));
   } catch {
     throw Object.assign(new Error('invalid JSON'), { status: 400 });
   }
+}
+
+const GROUP_ID_RE = /^g[0-9a-f]{8,32}$/;
+
+/** Validates a portable account bundle before it is written into the store.
+    Returns an error message, or null when the bundle is usable. */
+function bundleProblem(bundle) {
+  if (!bundle || typeof bundle !== 'object' || bundle.v !== 1) return 'Unsupported account bundle.';
+  const acc = bundle.account;
+  if (!acc || typeof acc !== 'object') return 'Account bundle is missing its account.';
+  if (!USERNAME_RE.test(String(acc.username || ''))) return 'Account bundle has an invalid name.';
+  if (typeof acc.salt !== 'string' || acc.salt.length < 8 || acc.salt.length > 200) {
+    return 'Account bundle has an invalid salt.';
+  }
+  if (typeof acc.verifier !== 'string' || !/^[A-Za-z0-9+/=]{20,80}$/.test(acc.verifier)) {
+    return 'Account bundle has an invalid verifier.';
+  }
+  const keys = acc.keys;
+  if (!keys || typeof keys !== 'object') return 'Account bundle has no key bundle.';
+  for (const field of ['ik', 'sig', 'spk', 'spkSig']) {
+    if (typeof keys[field] !== 'string' || keys[field].length < 32) {
+      return 'Account bundle has an incomplete key bundle.';
+    }
+  }
+  if (typeof acc.identityBackup !== 'string' || acc.identityBackup.length < 32) {
+    return 'Account bundle has no key backup.';
+  }
+  return null;
 }
 
 const hashToken = (token, salt) => crypto.scryptSync(String(token), salt, 32, { N: 16384, r: 8, p: 1 });
@@ -446,6 +477,98 @@ function createGoatServer({
         });
       }
 
+      // Account migration (in). A goat made on another relay brings its
+      // account record, contacts, groups and ciphertext history here. The
+      // verifier is scrypt(authToken, salt) on every relay, so copying it
+      // verbatim means the same name + passphrase opens the account here too.
+      // Signup protection still applies: non-loopback callers solve the same
+      // proof of work as a fresh signup.
+      if (route === '/api/import' && req.method === 'POST') {
+        const ip = req.socket.remoteAddress || 'local';
+        if (tooMany(`import:${ip}`, 60)) return fail(res, 429, 'Too many imports from here. Wait a minute.');
+        const body = await readJson(req, MAX_IMPORT);
+        const bundle = body.bundle;
+        const problem = bundleProblem(bundle);
+        if (problem) return fail(res, 400, problem);
+        const acc = bundle.account;
+        if (powRequired(ip)) {
+          const verdict = powVerify(ip, acc.username, body.pow);
+          if (verdict) return sendJson(res, 428, { ...verdict });
+        }
+        const name = acc.username.toLowerCase();
+        if (store.user(name)) return fail(res, 409, 'That name is already here.');
+
+        const record = {
+          username: acc.username,
+          displayName: String(acc.displayName || acc.username).trim().slice(0, 40) || acc.username,
+          about: String(acc.about || '').trim().slice(0, 120),
+          accent: Number.isFinite(acc.accent) ? Math.max(0, Math.min(360, Math.round(acc.accent))) : 0,
+          createdAt: Number(acc.createdAt) || Date.now(),
+          salt: acc.salt,
+          verifier: acc.verifier,
+          keys: { ik: acc.keys.ik, sig: acc.keys.sig, spk: acc.keys.spk, spkSig: acc.keys.spkSig },
+          identityBackup: acc.identityBackup,
+        };
+        const avatar = sanitizeImage(acc.avatar, MAX_AVATAR);
+        const banner = sanitizeImage(acc.banner, MAX_BANNER);
+        if (avatar) record.avatar = avatar;
+        if (banner) record.banner = banner;
+        store.putUser(record);
+
+        let groups = 0;
+        for (const g of (Array.isArray(bundle.groups) ? bundle.groups : []).slice(0, 200)) {
+          if (!g || !GROUP_ID_RE.test(String(g.id || '')) || store.getGroup(g.id)) continue;
+          const members = (Array.isArray(g.members) ? g.members : [])
+            .map((m) => String(m).toLowerCase())
+            .filter((m) => USERNAME_RE.test(m));
+          if (!members.includes(name)) members.push(name);
+          if (members.length < 2) continue;
+          store.createGroup({
+            id: g.id,
+            name: String(g.name || 'Group').trim().slice(0, 60) || 'Group',
+            owner: USERNAME_RE.test(String(g.owner || '')) ? g.owner : name,
+            members,
+          });
+          groups++;
+        }
+
+        let contacts = 0;
+        for (const rel of (Array.isArray(bundle.contacts) ? bundle.contacts : []).slice(0, 500)) {
+          const peer = String((rel && rel.peer) || '').toLowerCase();
+          if (!USERNAME_RE.test(peer) || peer === name) continue;
+          if (!['in', 'out', 'accepted'].includes(rel.state)) continue;
+          if (store.relation(name, peer)) continue;
+          store.setRelation(name, peer, rel.state);
+          contacts++;
+        }
+
+        let messages = 0;
+        for (const room of (Array.isArray(bundle.messages) ? bundle.messages : []).slice(0, 400)) {
+          const peer = String((room && room.peer) || '').toLowerCase();
+          if (!USERNAME_RE.test(peer) || peer === name) continue;
+          for (const m of (Array.isArray(room.list) ? room.list : []).slice(-3000)) {
+            if (!m || typeof m.env !== 'object' || !m.env) continue;
+            if (typeof m.env.ct !== 'string' || !m.env.header) continue;
+            const from = String(m.from || '').toLowerCase();
+            if (from !== name && from !== peer) continue;
+            store.pushMessage({
+              from,
+              to: from === name ? peer : name,
+              env: m.env,
+              clientId: typeof m.clientId === 'string' ? m.clientId : null,
+              ts: Number(m.ts) || undefined,
+            });
+            messages++;
+          }
+        }
+        store.flush();
+        return json(res, 200, {
+          ok: true,
+          username: record.username,
+          imported: { contacts, groups, messages },
+        });
+      }
+
       if (route === '/api/lookup' && req.method === 'GET') {
         const auth = authenticate(req);
         if (!auth) return fail(res, 401, 'Sign in first.');
@@ -466,6 +589,48 @@ function createGoatServer({
       const me = auth.user;
 
       if (route === '/api/bootstrap') return json(res, 200, bootstrap(me.username));
+
+      // Account migration (out): everything needed to stand this goat up on
+      // another relay — account record (same passphrase hash), contacts,
+      // groups and the ciphertext of every room it is part of.
+      if (route === '/api/export' && req.method === 'POST') {
+        if (tooMany(`export:${me.username.toLowerCase()}`, 10)) {
+          return fail(res, 429, 'Exported too often. Wait a minute.');
+        }
+        const name = me.username.toLowerCase();
+        const rooms = [];
+        for (const [room, list] of Object.entries(store.data.messages || {})) {
+          if (!Array.isArray(list) || !list.length) continue;
+          const peers = room.split('~');
+          if (!peers.includes(name)) continue;
+          const peer = peers.find((p) => p !== name);
+          if (!peer) continue; // a room with itself has nothing to carry
+          rooms.push({ peer, list: list.slice(-3000) });
+        }
+        if (rooms.length > 400) rooms.length = 400;
+        return json(res, 200, {
+          bundle: {
+            v: 1,
+            exportedAt: Date.now(),
+            account: {
+              username: me.username,
+              displayName: me.displayName || me.username,
+              about: me.about || '',
+              accent: me.accent ?? 0,
+              avatar: me.avatar || '',
+              banner: me.banner || '',
+              createdAt: me.createdAt,
+              salt: me.salt,
+              verifier: me.verifier,
+              keys: me.keys,
+              identityBackup: me.identityBackup,
+            },
+            contacts: store.contactsOf(name),
+            groups: store.groupsOf(name).map(publicGroup),
+            messages: rooms,
+          },
+        });
+      }
 
       if (route === '/api/logout' && req.method === 'POST') {
         store.dropSession(auth.token);
@@ -712,6 +877,12 @@ function createGoatServer({
   }
 
   const server = tls ? https.createServer(tls, handleRequest) : http.createServer(handleRequest);
+  // Node drops idle keep-alive sockets after 5s by default. A client that
+  // stalls (a slow proof-of-work solve, a laptop waking up, a tunnel hiccup)
+  // then reuses a socket the relay is already closing and sees a reset, so
+  // give idle connections a generous window instead.
+  server.keepAliveTimeout = 75_000;
+  server.headersTimeout = 80_000;
 
   const turnServer = turn
     ? createTurnServer({

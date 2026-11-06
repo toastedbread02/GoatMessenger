@@ -99,11 +99,13 @@
         <p class="auth-guest-hint">Guests can chat — screen sharing, camera and files need a full account.</p>
         <p class="auth-error" id="auth-error" hidden></p>
         <div class="auth-alt" id="auth-alt" hidden>
-          <label class="auth-alt-label" for="auth-alt-input">Sign in on another relay instead</label>
+          <label class="auth-alt-label" for="auth-alt-input">Account made on another relay?</label>
           <div class="auth-alt-row">
             <input id="auth-alt-input" type="url" placeholder="https://your-relay.example" autocomplete="off" spellcheck="false">
             <button class="ghost" id="auth-alt-go" type="button">Use relay</button>
           </div>
+          <button class="link auth-alt-move" id="auth-alt-move" type="button">Move my account to this relay instead</button>
+          <p class="auth-alt-hint">Signs in to that relay with the same name and passphrase, then copies the account here — contacts, groups and chat history included. Do it once and the goat works on both relays.</p>
         </div>
       </form>
       <div class="auth-meta">

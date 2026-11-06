@@ -1,6 +1,7 @@
 // GoatMessenger renderer: session handling, encrypted messaging, contacts, calls.
 import * as C from '../shared/crypto.mjs';
 import { isVerified, VERIFIED_TIP } from '../shared/verified.mjs';
+import { solveProofOfWork } from '../shared/pow.mjs';
 import { Api, ApiError } from './api.mjs';
 import { Vault, MAX_HISTORY } from './vault.mjs';
 import { CallManager } from './calls.mjs';
@@ -396,24 +397,6 @@ async function signUp(username, passphrase, displayNameValue, captchaToken) {
   }
   await startSession({ username: res.me.username, token: res.token, identity, bootstrap: res, backup });
   return res;
-}
-
-// SHA-256 proof of work: find a nonce whose digest has `bits` leading zeros.
-// crypto.subtle is native; the occasional yield keeps the UI alive while the
-// loop grinds (~65k hashes at the default 16 bits, a second or two).
-async function solveProofOfWork(bits, challenge, name) {
-  const enc = new TextEncoder();
-  for (let n = 0; ; n++) {
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(`${challenge}:${name}:${String(n)}`)));
-    let left = bits;
-    for (const byte of digest) {
-      if (byte === 0) { left -= 8; continue; }
-      for (let m = 0x80; m > 0; m >>= 1) { if (byte & m) break; left--; }
-      break;
-    }
-    if (left <= 0) return String(n);
-    if (n % 256 === 0) await new Promise((r) => setTimeout(r));
-  }
 }
 
 async function startSession({ username, token, identity, bootstrap, backup }) {
@@ -3184,6 +3167,46 @@ function wireStaticUi() {
     }
   });
 
+  // Account migration: copy this goat from the relay it was made on onto the
+  // one this session is talking to, history and contacts included. The login on
+  // the home relay proves ownership before anything is copied.
+  $('#auth-alt-move').addEventListener('click', async () => {
+    if (!altSignIn) return;
+    const button = $('#auth-alt-move');
+    const raw = $('#auth-alt-input').value.trim().replace(/\/$/, '');
+    if (!raw) {
+      authError('Enter the relay your account was made on.');
+      return;
+    }
+    $('#auth-error').hidden = true;
+    busy(button, 'Copying…');
+    try {
+      const keys = C.derivePassphraseKeys(altSignIn.pass, altSignIn.username);
+      const home = new Api(raw);
+      const login = await home.login({ username: altSignIn.username, authToken: keys.authToken });
+      home.setToken(login.token);
+      const { bundle } = await home.exportAccount();
+      const here = new Api(S.info.relayUrl);
+      const res = await here.importAccount(bundle);
+      await signIn(altSignIn.username, altSignIn.pass);
+      altSignIn = null;
+      $('#auth-alt').hidden = true;
+      const moved = res?.imported || {};
+      toast(res?.alreadyThere
+        ? 'That account was already copied here — signing in.'
+        : `Account copied here — ${moved.messages || 0} messages, ${moved.contacts || 0} contacts.`);
+    } catch (err) {
+      const message = err?.status === 409
+        ? 'That account is already on this relay — sign in without moving it.'
+        : err?.status === 401
+          ? 'That relay did not accept the passphrase, so nothing was copied.'
+          : err.message || 'Could not copy that account here.';
+      authError(message);
+    } finally {
+      unbusy(button);
+    }
+  });
+
   $('#auth-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const button = $('#auth-submit');
@@ -3215,10 +3238,13 @@ function wireStaticUi() {
         altSignIn = { username, pass };
         const box = $('#auth-alt');
         if (box) {
-          $('#auth-alt-input').value = S.info.relayUrl;
+          // Never leave the relay we just failed on in the box — switching to it
+          // is not the answer.
+          const input = $('#auth-alt-input');
+          if (input.value.trim().replace(/\/$/, '') === S.info.relayUrl) input.value = '';
           box.hidden = false;
         }
-        authError(`${message}\n\nAccounts live on the relay they were made on. This relay is ${S.info.relayUrl} — if you created this goat elsewhere, sign in on that relay below.`);
+        authError(`${message}\n\nThis session is on ${S.info.relayUrl}. If the goat was made on another relay, enter that relay below — sign in there, or copy the account over here so it works on both.`);
       } else {
         authError(message);
       }

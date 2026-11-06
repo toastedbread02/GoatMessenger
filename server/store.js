@@ -170,7 +170,7 @@ class Store {
     return roomKey(a, b);
   }
 
-  pushMessage({ from, to, env, clientId }) {
+  pushMessage({ from, to, env, clientId, ts }) {
     const room = Store.room(from, to);
     const list = (this.data.messages[room] = this.data.messages[room] || []);
     if (clientId) {
@@ -183,7 +183,9 @@ class Store {
       from: from.toLowerCase(),
       to: to.toLowerCase(),
       env,
-      ts: Date.now(),
+      // `ts` is supplied when history is migrated from another relay so the
+      // timeline keeps its original times.
+      ts: Number(ts) || Date.now(),
       clientId: clientId || null,
     };
     list.push(msg);
@@ -496,7 +498,7 @@ class KvStore {
 
   /* messages --------------------------------------------------------------- */
 
-  pushMessage({ from, to, env, clientId }) {
+  pushMessage({ from, to, env, clientId, ts }) {
     const room = Store.room(from, to);
     const list = (this.data.messages[room] = this.data.messages[room] || []);
     if (clientId) {
@@ -509,7 +511,7 @@ class KvStore {
       from: from.toLowerCase(),
       to: to.toLowerCase(),
       env,
-      ts: Date.now(),
+      ts: Number(ts) || Date.now(),
       clientId: clientId || null,
     };
     list.push(msg);
